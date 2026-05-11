@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+backend/venv/
+
+# Secrets and local config
+.env
+backend/.env
+*.env
+
+# Local/editor files
+.vscode/
+.idea/
+.claude/
+
+# Build/cache output
+dist/
+build/
+*.log
+
+# Archives
+*.zip
