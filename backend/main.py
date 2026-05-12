@@ -115,6 +115,48 @@ def myfxbook_datetime_to_local(value: Optional[str]) -> Optional[str]:
         return value
 
 
+def month_ranges_from_year_start():
+    now = datetime.utcnow()
+    current = datetime(now.year, 1, 1)
+    ranges = []
+    while current <= now:
+        next_month = datetime(current.year + 1, 1, 1) if current.month == 12 else datetime(current.year, current.month + 1, 1)
+        end = min(next_month - timedelta(days=1), now)
+        ranges.append((current, end))
+        current = next_month
+    return ranges
+
+
+async def get_monthly_gain_series(session: str, account_id: int, flat_gains: list, div: float) -> list:
+    ranges = month_ranges_from_year_start()
+    tasks = [
+        cached_get(
+            "https://www.myfxbook.com/api/get-gain.json",
+            {"session": session, "id": account_id, "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")},
+        )
+        for start, end in ranges
+    ]
+    gain_results = await asyncio.gather(*tasks, return_exceptions=True)
+    rows = []
+    for (start, end), result in zip(ranges, gain_results):
+        profit = 0.0
+        for g in flat_gains:
+            try:
+                d = datetime.strptime(g["date"], "%m/%d/%Y")
+                if start.date() <= d.date() <= end.date():
+                    profit += float(g.get("profit", 0))
+            except Exception:
+                pass
+        gain_value = None
+        if not isinstance(result, Exception):
+            try:
+                gain_value = round(float(result.get("value", 0)), 2)
+            except Exception:
+                gain_value = None
+        rows.append({"month": start.strftime("%Y-%m"), "label": start.strftime("%m/%Y"), "gain": gain_value, "profit": round(profit / div, 2)})
+    return rows
+
+
 async def get_myfxbook_session() -> str:
     now = datetime.utcnow()
     if _session_cache["session"] and _session_cache["expires"] > now:
@@ -291,6 +333,7 @@ async def get_account_data(slug: str):
             return round(usd * brl_rate, 2)
         if is_cents:
             growth_series = [{**g, "profit": round(g["profit"] / div, 2)} for g in growth_series]
+        monthly_gain_series = await get_monthly_gain_series(session, account_id, flat_gains, div)
         history = [{**trade, "openTimeLocal": myfxbook_datetime_to_local(trade.get("openTime")), "closeTimeLocal": myfxbook_datetime_to_local(trade.get("closeTime"))} for trade in history_data.get("history", [])[:50]]
         return {
             "slug": slug,
@@ -320,6 +363,7 @@ async def get_account_data(slug: str):
             "profit_total": to_usd(account_detail.get("profit")),
             "profit_total_brl": to_brl(account_detail.get("profit")),
             "growth_series": growth_series,
+            "monthly_gain_series": monthly_gain_series,
             "open_trades": open_trades_data.get("openTrades", []),
             "history": history,
         }
