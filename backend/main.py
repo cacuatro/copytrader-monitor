@@ -369,7 +369,7 @@ async def get_account_data(slug: str):
                 "openTimeLocal": myfxbook_datetime_to_local(trade.get("openTime")),
                 "closeTimeLocal": myfxbook_datetime_to_local(trade.get("closeTime")),
             }
-            for trade in history_data.get("history", [])[:80]
+            for trade in history_data.get("history", [])[:30]
         ]
         return {
             "slug": slug,
