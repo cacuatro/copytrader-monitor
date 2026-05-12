@@ -351,7 +351,26 @@ async def get_account_data(slug: str):
         if is_cents:
             growth_series = [{**g, "profit": round(g["profit"] / div, 2)} for g in growth_series]
         monthly_gain_series = await get_monthly_gain_series(session, account_id, flat_gains, div)
-        history = [{**trade, "openTimeLocal": myfxbook_datetime_to_local(trade.get("openTime")), "closeTimeLocal": myfxbook_datetime_to_local(trade.get("closeTime"))} for trade in history_data.get("history", [])[:50]]
+        def normalize_trade_money(trade: dict) -> dict:
+            converted = dict(trade)
+            for field in ("profit", "commission", "swap"):
+                if converted.get(field) is None:
+                    continue
+                try:
+                    converted[field] = round(float(converted[field]) / div, 2)
+                except Exception:
+                    pass
+            return converted
+
+        open_trades = [normalize_trade_money(trade) for trade in open_trades_data.get("openTrades", [])]
+        history = [
+            {
+                **normalize_trade_money(trade),
+                "openTimeLocal": myfxbook_datetime_to_local(trade.get("openTime")),
+                "closeTimeLocal": myfxbook_datetime_to_local(trade.get("closeTime")),
+            }
+            for trade in history_data.get("history", [])[:80]
+        ]
         return {
             "slug": slug,
             "name": account_info["name"],
@@ -381,7 +400,7 @@ async def get_account_data(slug: str):
             "profit_total_brl": to_brl(account_detail.get("profit")),
             "growth_series": growth_series,
             "monthly_gain_series": monthly_gain_series,
-            "open_trades": open_trades_data.get("openTrades", []),
+            "open_trades": open_trades,
             "history": history,
         }
     except HTTPException:
