@@ -196,11 +196,23 @@ async def get_usd_brl_rate() -> dict:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get("https://economia.awesomeapi.com.br/json/last/USD-BRL")
+        r.raise_for_status()
         quote = r.json().get("USDBRL", {})
         rate = float(quote.get("bid") or quote.get("ask"))
         result = {"rate": round(rate, 4), "source": "AwesomeAPI USD-BRL", "updated_at": quote.get("create_date")}
     except Exception:
-        result = {"rate": 5.0, "source": "fallback"}
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://open.er-api.com/v6/latest/USD")
+            r.raise_for_status()
+            data = r.json()
+            result = {
+                "rate": round(float(data["rates"]["BRL"]), 4),
+                "source": "Open Exchange Rates USD-BRL",
+                "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+        except Exception:
+            result = {"rate": 5.0, "source": "fallback"}
     _data_cache[cache_key] = {"data": result, "expires": now + timedelta(minutes=CACHE_TTL_MINUTES)}
     return result
 
@@ -216,6 +228,11 @@ async def root():
 @app.get("/api/status")
 async def api_status():
     return {"status": "ok", "service": "CopyTrader Monitor API"}
+
+
+@app.get("/api/exchange-rate")
+async def exchange_rate_status():
+    return await get_usd_brl_rate()
 
 
 @app.get("/accounts")
