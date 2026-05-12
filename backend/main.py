@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+﻿from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -253,7 +253,7 @@ async def get_account_data(slug: str):
         accounts_task = cached_get("https://www.myfxbook.com/api/get-my-accounts.json", {"session": session})
         open_trades_task = cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id})
         history_task = cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id})
-        daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": (datetime.utcnow() - timedelta(days=90)).strftime("%Y-%m-%d"), "end": datetime.utcnow().strftime("%Y-%m-%d")})
+        daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": datetime(datetime.utcnow().year, 1, 1).strftime("%Y-%m-%d"), "end": datetime.utcnow().strftime("%Y-%m-%d")})
         accounts_data, open_trades_data, history_data, daily_gain_data = await asyncio.gather(accounts_task, open_trades_task, history_task, daily_gain_task)
         account_detail = next((a for a in accounts_data.get("accounts", []) if a["id"] == account_id), None)
         if not account_detail:
@@ -379,3 +379,4 @@ async def serve_frontend(full_path: str):
     if not index_file.exists():
         raise HTTPException(404, "Frontend nao encontrado")
     return FileResponse(index_file)
+
