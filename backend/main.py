@@ -297,10 +297,15 @@ async def get_client(slug: str, authorization: Optional[str] = Header(None)):
     total_profit_week = sum(float(a.get("profit_week") or 0) for a in ok)
     total_profit_month = sum(float(a.get("profit_month") or 0) for a in ok)
     total_profit_total = sum(float(a.get("profit_total") or 0) for a in ok)
-    total_gain_day = sum(float(a.get("gain_day") or 0) for a in ok)
-    total_gain_week = sum(float(a.get("gain_week") or 0) for a in ok)
-    total_gain_month = sum(float(a.get("gain_month") or 0) for a in ok)
-    total_gain_total = sum(float(a.get("gain") or 0) for a in ok)
+    def consolidated_gain(profit: float) -> float:
+        starting_balance = total_balance - profit
+        if not starting_balance:
+            return 0.0
+        return round((profit / starting_balance) * 100, 2)
+    total_gain_day = consolidated_gain(total_profit_day)
+    total_gain_week = consolidated_gain(total_profit_week)
+    total_gain_month = consolidated_gain(total_profit_month)
+    total_gain_total = consolidated_gain(total_profit_total)
     usd_brl = await get_usd_brl_rate()
     brl_rate = usd_brl["rate"]
     return {
@@ -313,16 +318,16 @@ async def get_client(slug: str, authorization: Optional[str] = Header(None)):
         "total_balance": round(total_balance, 2),
         "total_balance_brl": round(total_balance * brl_rate, 2),
         "total_profit_day": round(total_profit_day, 2),
-        "total_gain_day": round(total_gain_day, 2),
+        "total_gain_day": total_gain_day,
         "total_profit_day_brl": round(total_profit_day * brl_rate, 2),
         "total_profit_week": round(total_profit_week, 2),
-        "total_gain_week": round(total_gain_week, 2),
+        "total_gain_week": total_gain_week,
         "total_profit_week_brl": round(total_profit_week * brl_rate, 2),
         "total_profit_month": round(total_profit_month, 2),
-        "total_gain_month": round(total_gain_month, 2),
+        "total_gain_month": total_gain_month,
         "total_profit_month_brl": round(total_profit_month * brl_rate, 2),
         "total_profit_total": round(total_profit_total, 2),
-        "total_gain_total": round(total_gain_total, 2),
+        "total_gain_total": total_gain_total,
         "total_profit_total_brl": round(total_profit_total * brl_rate, 2),
     }
 
