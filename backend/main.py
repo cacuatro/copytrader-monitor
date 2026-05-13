@@ -153,8 +153,34 @@ async def get_monthly_gain_series(session: str, account_id: int, flat_gains: lis
                 gain_value = round(float(result.get("value", 0)), 2)
             except Exception:
                 gain_value = None
-        rows.append({"month": start.strftime("%Y-%m"), "label": start.strftime("%m/%Y"), "gain": gain_value, "profit": round(profit / div, 2)})
+        profit_value = round(profit / div, 2)
+        if profit_value != 0 or (gain_value is not None and gain_value != 0):
+            rows.append({"month": start.strftime("%Y-%m"), "label": start.strftime("%m/%Y"), "gain": gain_value, "profit": profit_value})
     return rows
+
+
+async def get_period_gain_values(session: str, account_id: int) -> dict:
+    today = datetime.utcnow().date()
+    ranges = {
+        "gain_day": (today, today),
+        "gain_week": (today - timedelta(days=7), today),
+        "gain_month": (today - timedelta(days=30), today),
+    }
+    tasks = {
+        key: cached_get(
+            "https://www.myfxbook.com/api/get-gain.json",
+            {"session": session, "id": account_id, "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")},
+        )
+        for key, (start, end) in ranges.items()
+    }
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    values = {}
+    for key, result in zip(tasks.keys(), results):
+        try:
+            values[key] = round(float(result.get("value", 0)), 2) if not isinstance(result, Exception) else None
+        except Exception:
+            values[key] = None
+    return values
 
 
 async def get_myfxbook_session() -> str:
@@ -351,6 +377,7 @@ async def get_account_data(slug: str):
         if is_cents:
             growth_series = [{**g, "profit": round(g["profit"] / div, 2)} for g in growth_series]
         monthly_gain_series = await get_monthly_gain_series(session, account_id, flat_gains, div)
+        period_gains = await get_period_gain_values(session, account_id)
         def normalize_trade_money(trade: dict) -> dict:
             converted = dict(trade)
             for field in ("profit", "commission", "swap"):
@@ -391,10 +418,13 @@ async def get_account_data(slug: str):
             "demo": account_detail.get("demo", False),
             "lastUpdateDate": account_detail.get("lastUpdateDate"),
             "profit_day": round(profit_day / div, 2),
+            "gain_day": period_gains.get("gain_day"),
             "profit_day_brl": round((profit_day / div) * brl_rate, 2),
             "profit_week": round(profit_week / div, 2),
+            "gain_week": period_gains.get("gain_week"),
             "profit_week_brl": round((profit_week / div) * brl_rate, 2),
             "profit_month": round(profit_month / div, 2),
+            "gain_month": period_gains.get("gain_month"),
             "profit_month_brl": round((profit_month / div) * brl_rate, 2),
             "profit_total": to_usd(account_detail.get("profit")),
             "profit_total_brl": to_brl(account_detail.get("profit")),
