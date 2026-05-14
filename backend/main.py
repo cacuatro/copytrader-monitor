@@ -298,10 +298,9 @@ async def get_client(slug: str, authorization: Optional[str] = Header(None)):
     total_profit_month = sum(float(a.get("profit_month") or 0) for a in ok)
     total_profit_total = sum(float(a.get("profit_total") or 0) for a in ok)
     def consolidated_gain(profit: float) -> float:
-        starting_balance = total_balance - profit
-        if not starting_balance:
+        if not total_balance:
             return 0.0
-        return round((profit / starting_balance) * 100, 2)
+        return round((profit / total_balance) * 100, 2)
     total_gain_day = consolidated_gain(total_profit_day)
     total_gain_week = consolidated_gain(total_profit_week)
     total_gain_month = consolidated_gain(total_profit_month)
