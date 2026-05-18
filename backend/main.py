@@ -297,6 +297,9 @@ async def get_client(slug: str, authorization: Optional[str] = Header(None)):
     total_profit_week = sum(float(a.get("profit_week") or 0) for a in ok)
     total_profit_month = sum(float(a.get("profit_month") or 0) for a in ok)
     total_profit_total = sum(float(a.get("profit_total") or 0) for a in ok)
+    total_withdrawals_commission = sum(float(a.get("withdrawals_commission") or 0) for a in ok)
+    total_open_trades = sum(int(a.get("open_trades_count") or 0) for a in ok)
+    total_open_trades_profit = sum(float(a.get("open_trades_profit") or 0) for a in ok)
     def consolidated_gain(profit: float) -> float:
         if not total_balance:
             return 0.0
@@ -316,6 +319,11 @@ async def get_client(slug: str, authorization: Optional[str] = Header(None)):
         "exchange_rate_updated_at": usd_brl.get("updated_at"),
         "total_balance": round(total_balance, 2),
         "total_balance_brl": round(total_balance * brl_rate, 2),
+        "total_withdrawals_commission": round(total_withdrawals_commission, 2),
+        "total_withdrawals_commission_brl": round(total_withdrawals_commission * brl_rate, 2),
+        "total_open_trades": total_open_trades,
+        "total_open_trades_profit": round(total_open_trades_profit, 2),
+        "total_open_trades_profit_brl": round(total_open_trades_profit * brl_rate, 2),
         "total_profit_day": round(total_profit_day, 2),
         "total_gain_day": total_gain_day,
         "total_profit_day_brl": round(total_profit_day * brl_rate, 2),
@@ -402,6 +410,10 @@ async def get_account_data(slug: str):
             return converted
 
         open_trades = [normalize_trade_money(trade) for trade in open_trades_data.get("openTrades", [])]
+        open_trades_profit = round(sum(float(trade.get("profit") or 0) for trade in open_trades), 2)
+        withdrawals = to_usd(account_detail.get("withdrawals")) or 0
+        commission = to_usd(account_detail.get("commission")) or 0
+        withdrawals_commission = round(withdrawals + commission, 2)
         history = [
             {
                 **normalize_trade_money(trade),
@@ -427,6 +439,12 @@ async def get_account_data(slug: str):
             "drawdown": account_detail.get("drawdown"),
             "profit": to_usd(account_detail.get("profit")),
             "profit_brl": to_brl(account_detail.get("profit")),
+            "withdrawals": withdrawals,
+            "withdrawals_brl": round(withdrawals * brl_rate, 2),
+            "commission": commission,
+            "commission_brl": round(commission * brl_rate, 2),
+            "withdrawals_commission": withdrawals_commission,
+            "withdrawals_commission_brl": round(withdrawals_commission * brl_rate, 2),
             "demo": account_detail.get("demo", False),
             "lastUpdateDate": account_detail.get("lastUpdateDate"),
             "profit_day": round(profit_day / div, 2),
@@ -442,6 +460,9 @@ async def get_account_data(slug: str):
             "profit_total_brl": to_brl(account_detail.get("profit")),
             "growth_series": growth_series,
             "monthly_gain_series": monthly_gain_series,
+            "open_trades_count": len(open_trades),
+            "open_trades_profit": open_trades_profit,
+            "open_trades_profit_brl": round(open_trades_profit * brl_rate, 2),
             "open_trades": open_trades,
             "history": history,
         }
