@@ -47,7 +47,7 @@ ACCOUNTS_MAP = {
     "gold-dragon": {"id": 11709872, "name": "Gold Dragon", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "gold-long-ictrading": {"id": 11823718, "name": "Gold Long IC Trading", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "gold-long": {"id": 11709870, "name": "Gold Long", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
-    "rayla-conta-02": {"id": 12038663, "name": "Portfolio Estrategias MT5", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "rayla-conta-02": {"id": 12056626, "name": "Rayla Estrategia MT5", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "rayla-estrategias-mt4": {"id": 12038682, "name": "Portfolio Estrategias MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
 }
 
