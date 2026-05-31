@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
 import smtplib
 import threading
@@ -81,6 +82,20 @@ _session_cache = {"session": None, "expires": None}
 _data_cache = {}
 CACHE_TTL_MINUTES = 15
 _access_log_lock = threading.Lock()
+LOCAL_TZ = ZoneInfo("America/Sao_Paulo")
+
+
+def local_now() -> datetime:
+    return datetime.now(LOCAL_TZ)
+
+
+def local_timestamp() -> dict:
+    now = local_now()
+    return {
+        "at": now.strftime("%d/%m/%Y %H:%M"),
+        "ts": now.isoformat(timespec="microseconds"),
+        "timezone": "America/Sao_Paulo",
+    }
 
 
 def make_token(subject: str, role: str = "client") -> str:
@@ -150,8 +165,9 @@ def read_access_logs(limit: int = 200) -> list:
 
 def write_access_log(event: str, client_slug: str, request: Request, success: bool = True, username: str = "") -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = local_timestamp()
     entry = {
-        "at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        **stamp,
         "event": event,
         "client_slug": client_slug,
         "client_name": CLIENTS_MAP.get(client_slug, {}).get("name", client_slug),
@@ -182,11 +198,10 @@ def recent_client_access(client_slug: str) -> Optional[dict]:
 
 
 def notice_entry(text: str, scope: str, client_slug: str = "") -> dict:
-    now = datetime.utcnow()
+    stamp = local_timestamp()
     return {
-        "id": hashlib.sha1(f"{scope}:{client_slug}:{now.isoformat()}:{text}".encode()).hexdigest()[:12],
-        "at": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "ts": now.isoformat(timespec="microseconds") + "Z",
+        "id": hashlib.sha1(f"{scope}:{client_slug}:{stamp['ts']}:{text}".encode()).hexdigest()[:12],
+        **stamp,
         "scope": scope,
         "client_slug": client_slug,
         "text": text[:1000],
