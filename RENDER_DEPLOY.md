@@ -13,6 +13,8 @@ MYFXBOOK_EMAIL=seu_email_myfxbook
 MYFXBOOK_PASSWORD=sua_senha_myfxbook
 AUTH_SECRET=um_texto_grande_e_aleatorio
 TOKEN_TTL_HOURS=12
+ADMIN_USERNAME=seu_usuario_admin
+ADMIN_PASSWORD=sua_senha_admin_segura
 ```
 
 Opcional:
@@ -29,6 +31,7 @@ Depois do deploy, use:
 
 ```txt
 https://seu-projeto.onrender.com/?cliente=rayla
+https://seu-projeto.onrender.com/admin
 ```
 
 Health check da API:

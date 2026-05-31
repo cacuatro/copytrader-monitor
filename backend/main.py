@@ -1,5 +1,6 @@
 ﻿from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import httpx
@@ -14,6 +15,7 @@ import hmac
 from datetime import datetime, timedelta
 from typing import Optional
 import smtplib
+import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -42,6 +44,11 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 AUTH_SECRET = os.getenv("AUTH_SECRET", "troque-este-segredo-em-producao")
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "12"))
 USD_BRL_RATE = os.getenv("USD_BRL_RATE", "")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
+ACCESS_LOG_FILE = DATA_DIR / "access_logs.json"
+NOTICE_FILE = DATA_DIR / "client_notices.json"
 
 ACCOUNTS_MAP = {
     "gold-dragon": {"id": 11709872, "name": "Gold Dragon", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
@@ -56,6 +63,7 @@ CLIENTS_MAP = {
         "name": "Cliente Teste",
         "username": "cliente-teste",
         "password": "teste123",
+        "notice": "Bem-vindo ao painel. Os resultados sao atualizados conforme disponibilidade do MyFXBook.",
         "notify_emails": [],
         "accounts": ["gold-dragon", "gold-long-ictrading", "gold-long"],
     },
@@ -63,6 +71,7 @@ CLIENTS_MAP = {
         "name": "Rayla",
         "username": "rayla",
         "password": "Rayla@2026",
+        "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
         "notify_emails": [],
         "accounts": ["rayla-conta-02", "rayla-estrategias-mt4"],
     },
@@ -71,38 +80,131 @@ CLIENTS_MAP = {
 _session_cache = {"session": None, "expires": None}
 _data_cache = {}
 CACHE_TTL_MINUTES = 15
+_access_log_lock = threading.Lock()
 
 
-def make_token(client_slug: str) -> str:
+def make_token(subject: str, role: str = "client") -> str:
     expires = int((datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS)).timestamp())
-    payload = f"{client_slug}:{expires}"
+    payload = f"{subject}:{role}:{expires}"
     signature = hmac.new(AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{payload}:{signature}".encode()).decode()
 
 
-def verify_token(token: str) -> str:
+def verify_token(token: str) -> dict:
     try:
         raw = base64.urlsafe_b64decode(token.encode()).decode()
-        client_slug, expires, signature = raw.rsplit(":", 2)
+        parts = raw.rsplit(":", 3)
+        if len(parts) == 4:
+            subject, role, expires, signature = parts
+        else:
+            subject, expires, signature = raw.rsplit(":", 2)
+            role = "client"
     except Exception:
         raise HTTPException(401, "Token invalido")
-    payload = f"{client_slug}:{expires}"
+    payload = f"{subject}:{role}:{expires}"
     expected = hmac.new(AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise HTTPException(401, "Token invalido")
     if int(expires) < int(datetime.utcnow().timestamp()):
         raise HTTPException(401, "Sessao expirada")
-    if client_slug not in CLIENTS_MAP:
+    if role == "client" and subject not in CLIENTS_MAP:
         raise HTTPException(401, "Cliente invalido")
-    return client_slug
+    if role == "admin" and subject != "admin":
+        raise HTTPException(401, "Administrador invalido")
+    return {"subject": subject, "role": role}
 
 
 def require_client_auth(slug: str, authorization: Optional[str]) -> None:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Login necessario")
-    token_slug = verify_token(authorization.replace("Bearer ", "", 1))
-    if token_slug != slug:
+    token_data = verify_token(authorization.replace("Bearer ", "", 1))
+    if token_data["role"] != "client" or token_data["subject"] != slug:
         raise HTTPException(403, "Acesso negado")
+
+
+def require_admin_auth(authorization: Optional[str]) -> None:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Login necessario")
+    token_data = verify_token(authorization.replace("Bearer ", "", 1))
+    if token_data["role"] != "admin":
+        raise HTTPException(403, "Acesso negado")
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+def read_access_logs(limit: int = 200) -> list:
+    if not ACCESS_LOG_FILE.exists():
+        return []
+    try:
+        with ACCESS_LOG_FILE.open("r", encoding="utf-8") as f:
+            logs = json.load(f)
+    except Exception:
+        return []
+    return list(reversed(logs[-limit:]))
+
+
+def write_access_log(event: str, client_slug: str, request: Request, success: bool = True, username: str = "") -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "event": event,
+        "client_slug": client_slug,
+        "client_name": CLIENTS_MAP.get(client_slug, {}).get("name", client_slug),
+        "username": username,
+        "success": success,
+        "ip": client_ip(request),
+        "user_agent": request.headers.get("user-agent", "")[:180],
+    }
+    with _access_log_lock:
+        logs = []
+        if ACCESS_LOG_FILE.exists():
+            try:
+                with ACCESS_LOG_FILE.open("r", encoding="utf-8") as f:
+                    logs = json.load(f)
+            except Exception:
+                logs = []
+        logs.append(entry)
+        logs = logs[-1000:]
+        with ACCESS_LOG_FILE.open("w", encoding="utf-8") as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+
+
+def recent_client_access(client_slug: str) -> Optional[dict]:
+    for log in read_access_logs(1000):
+        if log.get("client_slug") == client_slug and log.get("success") and log.get("event") in {"login", "panel"}:
+            return log
+    return None
+
+
+def read_notice_overrides() -> dict:
+    if not NOTICE_FILE.exists():
+        return {}
+    try:
+        with NOTICE_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_notice_override(client_slug: str, notice: str) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    notices = read_notice_overrides()
+    notices[client_slug] = notice[:1000]
+    with NOTICE_FILE.open("w", encoding="utf-8") as f:
+        json.dump(notices, f, ensure_ascii=False, indent=2)
+
+
+def client_notice(client_slug: str) -> str:
+    notices = read_notice_overrides()
+    if client_slug in notices:
+        return str(notices[client_slug])
+    return CLIENTS_MAP.get(client_slug, {}).get("notice", "")
 
 
 def myfxbook_datetime_to_local(value: Optional[str]) -> Optional[str]:
@@ -267,23 +369,26 @@ async def list_accounts():
 
 
 @app.post("/login")
-async def login(credentials: dict):
+async def login(credentials: dict, request: Request):
     username = str(credentials.get("username", "")).strip()
     password = str(credentials.get("password", ""))
     requested_slug = str(credentials.get("client_slug", "")).strip()
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        return {"token": make_token("admin", "admin"), "role": "admin", "name": "Administrador", "expires_in_hours": TOKEN_TTL_HOURS}
     client_slug = next((slug for slug, info in CLIENTS_MAP.items() if info.get("username") == username and info.get("password") == password), None)
     if not client_slug:
+        write_access_log("login", requested_slug or "desconhecido", request, success=False, username=username)
         raise HTTPException(401, "Usuario ou senha invalidos")
     if requested_slug and requested_slug != client_slug:
+        write_access_log("login", requested_slug, request, success=False, username=username)
         raise HTTPException(403, "Usuario nao autorizado para este cliente")
-    return {"token": make_token(client_slug), "client_slug": client_slug, "name": CLIENTS_MAP[client_slug]["name"], "expires_in_hours": TOKEN_TTL_HOURS}
+    write_access_log("login", client_slug, request, username=username)
+    return {"token": make_token(client_slug), "role": "client", "client_slug": client_slug, "name": CLIENTS_MAP[client_slug]["name"], "expires_in_hours": TOKEN_TTL_HOURS}
 
 
-@app.get("/cliente/{slug}")
-async def get_client(slug: str, authorization: Optional[str] = Header(None)):
+async def build_client_data(slug: str) -> dict:
     if slug not in CLIENTS_MAP:
         raise HTTPException(404, "Cliente nao encontrado")
-    require_client_auth(slug, authorization)
     client_info = CLIENTS_MAP[slug]
     results = []
     for acc_slug in client_info["accounts"]:
@@ -313,6 +418,7 @@ async def get_client(slug: str, authorization: Optional[str] = Header(None)):
     return {
         "slug": slug,
         "name": client_info["name"],
+        "notice": client_notice(slug),
         "accounts": results,
         "usd_brl_rate": brl_rate,
         "exchange_rate_source": usd_brl["source"],
@@ -337,6 +443,44 @@ async def get_client(slug: str, authorization: Optional[str] = Header(None)):
         "total_gain_total": total_gain_total,
         "total_profit_total_brl": round(total_profit_total * brl_rate, 2),
     }
+
+
+@app.get("/cliente/{slug}")
+async def get_client(slug: str, request: Request, authorization: Optional[str] = Header(None)):
+    require_client_auth(slug, authorization)
+    write_access_log("panel", slug, request)
+    return await build_client_data(slug)
+
+
+@app.get("/admin/summary")
+async def admin_summary(authorization: Optional[str] = Header(None)):
+    require_admin_auth(authorization)
+    clients = []
+    for slug, info in CLIENTS_MAP.items():
+        try:
+            data = await build_client_data(slug)
+            last_access = recent_client_access(slug)
+            clients.append({
+                "slug": slug,
+                "name": info["name"],
+                "username": info.get("username"),
+                "notice": client_notice(slug),
+                "last_access": last_access,
+                "data": data,
+            })
+        except Exception as e:
+            clients.append({"slug": slug, "name": info["name"], "error": str(e), "last_access": recent_client_access(slug)})
+    return {"clients": clients, "access_logs": read_access_logs(200)}
+
+
+@app.post("/admin/notice/{slug}")
+async def update_client_notice(slug: str, payload: dict, authorization: Optional[str] = Header(None)):
+    require_admin_auth(authorization)
+    if slug not in CLIENTS_MAP:
+        raise HTTPException(404, "Cliente nao encontrado")
+    notice = str(payload.get("notice", "")).strip()
+    write_notice_override(slug, notice)
+    return {"slug": slug, "notice": notice}
 
 
 @app.get("/account/{slug}")
@@ -447,6 +591,7 @@ async def get_account_data(slug: str):
             "withdrawals_commission_brl": round(withdrawals_commission * brl_rate, 2),
             "demo": account_detail.get("demo", False),
             "lastUpdateDate": account_detail.get("lastUpdateDate"),
+            "myfxbook_updated_at": account_detail.get("lastUpdateDate"),
             "profit_day": round(profit_day / div, 2),
             "gain_day": period_gains.get("gain_day"),
             "profit_day_brl": round((profit_day / div) * brl_rate, 2),
@@ -498,7 +643,7 @@ async def trigger_notify(slug: str, background_tasks: BackgroundTasks):
       <p style='color:#888;font-size:13px;margin-top:0;'>Resultado diario - {datetime.utcnow().strftime('%d/%m/%Y')}</p>
       <p>Resultado do dia: ${data['profit_day']}</p>
       <p>Resultado semanal: ${data['profit_week']}</p>
-      <p>Resultado mensal: ${data['profit_month']}</p>
+      <p>Resultado ultimos 30 dias: ${data['profit_month']}</p>
       <p>Saldo atual: ${data['balance']:,.2f}</p>
     </div>
     """
