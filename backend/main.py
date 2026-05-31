@@ -181,29 +181,80 @@ def recent_client_access(client_slug: str) -> Optional[dict]:
     return None
 
 
-def read_notice_overrides() -> dict:
+def notice_entry(text: str, scope: str, client_slug: str = "") -> dict:
+    now = datetime.utcnow()
+    return {
+        "id": hashlib.sha1(f"{scope}:{client_slug}:{now.isoformat()}:{text}".encode()).hexdigest()[:12],
+        "at": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "ts": now.isoformat(timespec="microseconds") + "Z",
+        "scope": scope,
+        "client_slug": client_slug,
+        "text": text[:1000],
+    }
+
+
+def read_notice_store() -> dict:
     if not NOTICE_FILE.exists():
-        return {}
+        return {"global": [], "clients": {}}
     try:
         with NOTICE_FILE.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
     except Exception:
-        return {}
+        return {"global": [], "clients": {}}
+    if not isinstance(data, dict):
+        return {"global": [], "clients": {}}
+    if "global" in data or "clients" in data:
+        return {
+            "global": data.get("global", []) if isinstance(data.get("global", []), list) else [],
+            "clients": data.get("clients", {}) if isinstance(data.get("clients", {}), dict) else {},
+        }
+    clients = {}
+    for slug, text in data.items():
+        if isinstance(text, str) and text.strip():
+            clients[slug] = [notice_entry(text.strip(), "client", slug)]
+    return {"global": [], "clients": clients}
 
 
-def write_notice_override(client_slug: str, notice: str) -> None:
+def write_notice_store(store: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    notices = read_notice_overrides()
-    notices[client_slug] = notice[:1000]
     with NOTICE_FILE.open("w", encoding="utf-8") as f:
-        json.dump(notices, f, ensure_ascii=False, indent=2)
+        json.dump(store, f, ensure_ascii=False, indent=2)
+
+
+def append_notice(scope: str, text: str, client_slug: str = "") -> dict:
+    text = text.strip()[:1000]
+    if not text:
+        raise HTTPException(400, "Comunicado vazio")
+    store = read_notice_store()
+    entry = notice_entry(text, scope, client_slug)
+    if scope == "global":
+        store["global"] = [entry] + list(store.get("global", []))
+        store["global"] = store["global"][:50]
+    else:
+        clients = store.setdefault("clients", {})
+        clients[client_slug] = [entry] + list(clients.get(client_slug, []))
+        clients[client_slug] = clients[client_slug][:50]
+    write_notice_store(store)
+    return entry
+
+
+def notice_history(client_slug: str, limit: int = 10) -> list:
+    store = read_notice_store()
+    entries = []
+    for entry in store.get("global", []):
+        if isinstance(entry, dict):
+            entries.append({**entry, "scope_label": "Todos"})
+    for entry in store.get("clients", {}).get(client_slug, []):
+        if isinstance(entry, dict):
+            entries.append({**entry, "scope_label": "Cliente"})
+    entries.sort(key=lambda item: item.get("ts") or item.get("at", ""), reverse=True)
+    return entries[:limit]
 
 
 def client_notice(client_slug: str) -> str:
-    notices = read_notice_overrides()
-    if client_slug in notices:
-        return str(notices[client_slug])
+    history = notice_history(client_slug, 1)
+    if history:
+        return str(history[0].get("text", ""))
     return CLIENTS_MAP.get(client_slug, {}).get("notice", "")
 
 
@@ -419,6 +470,7 @@ async def build_client_data(slug: str) -> dict:
         "slug": slug,
         "name": client_info["name"],
         "notice": client_notice(slug),
+        "notice_history": notice_history(slug),
         "accounts": results,
         "usd_brl_rate": brl_rate,
         "exchange_rate_source": usd_brl["source"],
@@ -470,7 +522,7 @@ async def admin_summary(authorization: Optional[str] = Header(None)):
             })
         except Exception as e:
             clients.append({"slug": slug, "name": info["name"], "error": str(e), "last_access": recent_client_access(slug)})
-    return {"clients": clients, "access_logs": read_access_logs(200)}
+    return {"clients": clients, "access_logs": read_access_logs(200), "global_notices": read_notice_store().get("global", [])[:10]}
 
 
 @app.post("/admin/notice/{slug}")
@@ -478,9 +530,15 @@ async def update_client_notice(slug: str, payload: dict, authorization: Optional
     require_admin_auth(authorization)
     if slug not in CLIENTS_MAP:
         raise HTTPException(404, "Cliente nao encontrado")
-    notice = str(payload.get("notice", "")).strip()
-    write_notice_override(slug, notice)
-    return {"slug": slug, "notice": notice}
+    entry = append_notice("client", str(payload.get("notice", "")), slug)
+    return {"slug": slug, "notice": entry}
+
+
+@app.post("/admin/notice-all")
+async def update_global_notice(payload: dict, authorization: Optional[str] = Header(None)):
+    require_admin_auth(authorization)
+    entry = append_notice("global", str(payload.get("notice", "")))
+    return {"notice": entry}
 
 
 @app.get("/account/{slug}")
