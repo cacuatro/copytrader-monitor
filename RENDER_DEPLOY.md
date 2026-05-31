@@ -15,6 +15,7 @@ AUTH_SECRET=um_texto_grande_e_aleatorio
 TOKEN_TTL_HOURS=12
 ADMIN_USERNAME=seu_usuario_admin
 ADMIN_PASSWORD=sua_senha_admin_segura
+SUPPORT_WHATSAPP=5548999999999
 ```
 
 Opcional:

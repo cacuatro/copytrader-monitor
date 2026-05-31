@@ -50,6 +50,9 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 ACCESS_LOG_FILE = DATA_DIR / "access_logs.json"
 NOTICE_FILE = DATA_DIR / "client_notices.json"
+CLIENT_CONFIG_FILE = DATA_DIR / "client_config.json"
+AUDIT_LOG_FILE = DATA_DIR / "audit_logs.json"
+SUPPORT_WHATSAPP = os.getenv("SUPPORT_WHATSAPP", "")
 
 ACCOUNTS_MAP = {
     "gold-dragon": {"id": 11709872, "name": "Gold Dragon", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
@@ -98,6 +101,70 @@ def local_timestamp() -> dict:
     }
 
 
+def read_json_file(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, type(default)) else default
+    except Exception:
+        return default
+
+
+def write_json_file(path: Path, data) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def read_client_config() -> dict:
+    return read_json_file(CLIENT_CONFIG_FILE, {})
+
+
+def write_client_config(config: dict) -> None:
+    write_json_file(CLIENT_CONFIG_FILE, config)
+
+
+def clients_map() -> dict:
+    overrides = read_client_config()
+    merged = {slug: dict(info) for slug, info in CLIENTS_MAP.items()}
+    for slug, data in overrides.items():
+        if slug not in merged or not isinstance(data, dict):
+            continue
+        merged[slug].update({k: v for k, v in data.items() if v is not None})
+    return merged
+
+
+def get_client_info(slug: str) -> dict:
+    clients = clients_map()
+    if slug not in clients:
+        raise HTTPException(404, "Cliente nao encontrado")
+    return clients[slug]
+
+
+def update_client_config(slug: str, updates: dict) -> dict:
+    if slug not in CLIENTS_MAP:
+        raise HTTPException(404, "Cliente nao encontrado")
+    config = read_client_config()
+    current = config.get(slug, {}) if isinstance(config.get(slug, {}), dict) else {}
+    current.update({k: v for k, v in updates.items() if v is not None})
+    config[slug] = current
+    write_client_config(config)
+    return clients_map()[slug]
+
+
+def audit_log(actor: str, action: str, target: str, details: dict | None = None) -> None:
+    logs = read_json_file(AUDIT_LOG_FILE, [])
+    entry = {**local_timestamp(), "actor": actor, "action": action, "target": target, "details": details or {}}
+    logs.append(entry)
+    write_json_file(AUDIT_LOG_FILE, logs[-1000:])
+
+
+def read_audit_logs(limit: int = 200) -> list:
+    return list(reversed(read_json_file(AUDIT_LOG_FILE, [])[-limit:]))
+
+
 def make_token(subject: str, role: str = "client") -> str:
     expires = int((datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS)).timestamp())
     payload = f"{subject}:{role}:{expires}"
@@ -122,7 +189,7 @@ def verify_token(token: str) -> dict:
         raise HTTPException(401, "Token invalido")
     if int(expires) < int(datetime.utcnow().timestamp()):
         raise HTTPException(401, "Sessao expirada")
-    if role == "client" and subject not in CLIENTS_MAP:
+    if role == "client" and subject not in clients_map():
         raise HTTPException(401, "Cliente invalido")
     if role == "admin" and subject != "admin":
         raise HTTPException(401, "Administrador invalido")
@@ -170,7 +237,7 @@ def write_access_log(event: str, client_slug: str, request: Request, success: bo
         **stamp,
         "event": event,
         "client_slug": client_slug,
-        "client_name": CLIENTS_MAP.get(client_slug, {}).get("name", client_slug),
+        "client_name": clients_map().get(client_slug, {}).get("name", client_slug),
         "username": username,
         "success": success,
         "ip": client_ip(request),
@@ -270,7 +337,7 @@ def client_notice(client_slug: str) -> str:
     history = notice_history(client_slug, 1)
     if history:
         return str(history[0].get("text", ""))
-    return CLIENTS_MAP.get(client_slug, {}).get("notice", "")
+    return clients_map().get(client_slug, {}).get("notice", "")
 
 
 def myfxbook_datetime_to_local(value: Optional[str]) -> Optional[str]:
@@ -281,6 +348,33 @@ def myfxbook_datetime_to_local(value: Optional[str]) -> Optional[str]:
         return dt.strftime("%d/%m/%Y %H:%M")
     except Exception:
         return value
+
+
+def parse_myfxbook_update(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%m/%d/%Y %H:%M").replace(tzinfo=LOCAL_TZ)
+    except Exception:
+        return None
+
+
+def health_from_clients(clients: list) -> dict:
+    accounts = []
+    stale = []
+    now = local_now()
+    for client in clients:
+        data = client.get("data") or {}
+        for acc in data.get("accounts", []):
+            if acc.get("error"):
+                stale.append({"client": client.get("name"), "strategy": acc.get("name"), "reason": "erro"})
+                continue
+            updated = parse_myfxbook_update(acc.get("myfxbook_updated_at") or acc.get("lastUpdateDate"))
+            item = {"client": client.get("name"), "strategy": acc.get("name"), "updated_at": acc.get("myfxbook_updated_at") or acc.get("lastUpdateDate")}
+            accounts.append(item)
+            if not updated or (now - updated) > timedelta(hours=12):
+                stale.append(item)
+    return {"accounts": len(accounts), "stale": len(stale), "ok": max(0, len(accounts) - len(stale)), "stale_accounts": stale[:20]}
 
 
 def month_ranges_from_year_start():
@@ -441,7 +535,8 @@ async def login(credentials: dict, request: Request):
     requested_slug = str(credentials.get("client_slug", "")).strip()
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         return {"token": make_token("admin", "admin"), "role": "admin", "name": "Administrador", "expires_in_hours": TOKEN_TTL_HOURS}
-    client_slug = next((slug for slug, info in CLIENTS_MAP.items() if info.get("username") == username and info.get("password") == password), None)
+    all_clients = clients_map()
+    client_slug = next((slug for slug, info in all_clients.items() if info.get("username") == username and info.get("password") == password), None)
     if not client_slug:
         write_access_log("login", requested_slug or "desconhecido", request, success=False, username=username)
         raise HTTPException(401, "Usuario ou senha invalidos")
@@ -449,13 +544,11 @@ async def login(credentials: dict, request: Request):
         write_access_log("login", requested_slug, request, success=False, username=username)
         raise HTTPException(403, "Usuario nao autorizado para este cliente")
     write_access_log("login", client_slug, request, username=username)
-    return {"token": make_token(client_slug), "role": "client", "client_slug": client_slug, "name": CLIENTS_MAP[client_slug]["name"], "expires_in_hours": TOKEN_TTL_HOURS}
+    return {"token": make_token(client_slug), "role": "client", "client_slug": client_slug, "name": all_clients[client_slug]["name"], "expires_in_hours": TOKEN_TTL_HOURS}
 
 
 async def build_client_data(slug: str) -> dict:
-    if slug not in CLIENTS_MAP:
-        raise HTTPException(404, "Cliente nao encontrado")
-    client_info = CLIENTS_MAP[slug]
+    client_info = get_client_info(slug)
     results = []
     for acc_slug in client_info["accounts"]:
         try:
@@ -481,9 +574,18 @@ async def build_client_data(slug: str) -> dict:
     total_gain_total = consolidated_gain(total_profit_total)
     usd_brl = await get_usd_brl_rate()
     brl_rate = usd_brl["rate"]
+    manual_withdrawals = round(float(client_info.get("manual_withdrawals") or 0), 2)
+    manual_commission = round(float(client_info.get("manual_commission") or 0), 2)
     return {
         "slug": slug,
         "name": client_info["name"],
+        "username": client_info.get("username", ""),
+        "support_whatsapp": client_info.get("support_whatsapp") or SUPPORT_WHATSAPP,
+        "financial_notes": client_info.get("financial_notes", ""),
+        "manual_withdrawals": manual_withdrawals,
+        "manual_commission": manual_commission,
+        "manual_withdrawals_brl": round(manual_withdrawals * brl_rate, 2),
+        "manual_commission_brl": round(manual_commission * brl_rate, 2),
         "notice": client_notice(slug),
         "notice_history": notice_history(slug),
         "accounts": results,
@@ -523,7 +625,7 @@ async def get_client(slug: str, request: Request, authorization: Optional[str] =
 async def admin_summary(authorization: Optional[str] = Header(None)):
     require_admin_auth(authorization)
     clients = []
-    for slug, info in CLIENTS_MAP.items():
+    for slug, info in clients_map().items():
         try:
             data = await build_client_data(slug)
             last_access = recent_client_access(slug)
@@ -537,15 +639,69 @@ async def admin_summary(authorization: Optional[str] = Header(None)):
             })
         except Exception as e:
             clients.append({"slug": slug, "name": info["name"], "error": str(e), "last_access": recent_client_access(slug)})
-    return {"clients": clients, "access_logs": read_access_logs(200), "global_notices": read_notice_store().get("global", [])[:10]}
+    return {
+        "clients": clients,
+        "access_logs": read_access_logs(200),
+        "audit_logs": read_audit_logs(200),
+        "global_notices": read_notice_store().get("global", [])[:10],
+        "health": health_from_clients(clients),
+    }
+
+
+@app.post("/cliente/{slug}/profile")
+async def update_profile(slug: str, payload: dict, authorization: Optional[str] = Header(None)):
+    require_client_auth(slug, authorization)
+    info = get_client_info(slug)
+    updates = {}
+    name = str(payload.get("name", "")).strip()
+    username = str(payload.get("username", "")).strip()
+    current_password = str(payload.get("current_password", ""))
+    new_password = str(payload.get("new_password", ""))
+    if name:
+        updates["name"] = name
+    if username:
+        updates["username"] = username
+    if new_password:
+        if current_password != info.get("password"):
+            raise HTTPException(403, "Senha atual invalida")
+        updates["password"] = new_password
+    if not updates:
+        return {"updated": False}
+    updated = update_client_config(slug, updates)
+    audit_log(slug, "profile_update", slug, {"fields": list(updates.keys())})
+    return {"updated": True, "name": updated.get("name"), "username": updated.get("username")}
+
+
+@app.post("/admin/client/{slug}")
+async def update_admin_client(slug: str, payload: dict, authorization: Optional[str] = Header(None)):
+    require_admin_auth(authorization)
+    if slug not in clients_map():
+        raise HTTPException(404, "Cliente nao encontrado")
+    allowed = {
+        "name": str(payload.get("name", "")).strip() or None,
+        "username": str(payload.get("username", "")).strip() or None,
+        "password": str(payload.get("password", "")).strip() or None,
+        "support_whatsapp": str(payload.get("support_whatsapp", "")).strip(),
+        "financial_notes": str(payload.get("financial_notes", "")).strip(),
+    }
+    for money_field in ("manual_withdrawals", "manual_commission"):
+        if payload.get(money_field) not in (None, ""):
+            try:
+                allowed[money_field] = round(float(payload.get(money_field)), 2)
+            except Exception:
+                raise HTTPException(400, f"{money_field} invalido")
+    updated = update_client_config(slug, allowed)
+    audit_log("admin", "client_update", slug, {"fields": [k for k, v in allowed.items() if v is not None]})
+    return {"slug": slug, "client": {k: updated.get(k) for k in ("name", "username", "support_whatsapp", "financial_notes", "manual_withdrawals", "manual_commission")}}
 
 
 @app.post("/admin/notice/{slug}")
 async def update_client_notice(slug: str, payload: dict, authorization: Optional[str] = Header(None)):
     require_admin_auth(authorization)
-    if slug not in CLIENTS_MAP:
+    if slug not in clients_map():
         raise HTTPException(404, "Cliente nao encontrado")
     entry = append_notice("client", str(payload.get("notice", "")), slug)
+    audit_log("admin", "client_notice", slug, {"notice_id": entry.get("id")})
     return {"slug": slug, "notice": entry}
 
 
@@ -553,12 +709,13 @@ async def update_client_notice(slug: str, payload: dict, authorization: Optional
 async def update_global_notice(payload: dict, authorization: Optional[str] = Header(None)):
     require_admin_auth(authorization)
     entry = append_notice("global", str(payload.get("notice", "")))
+    audit_log("admin", "global_notice", "all", {"notice_id": entry.get("id")})
     return {"notice": entry}
 
 
 @app.get("/account/{slug}")
 async def get_account(slug: str, authorization: Optional[str] = Header(None)):
-    allowed_client = next((client_slug for client_slug, info in CLIENTS_MAP.items() if slug in info["accounts"]), None)
+    allowed_client = next((client_slug for client_slug, info in clients_map().items() if slug in info["accounts"]), None)
     if not allowed_client:
         raise HTTPException(404, "Conta nao encontrada")
     require_client_auth(allowed_client, authorization)
@@ -720,7 +877,7 @@ async def trigger_notify(slug: str, background_tasks: BackgroundTasks):
       <p>Saldo atual: ${data['balance']:,.2f}</p>
     </div>
     """
-    notify_emails = [email for client in CLIENTS_MAP.values() if slug in client["accounts"] for email in client.get("notify_emails", [])]
+    notify_emails = [email for client in clients_map().values() if slug in client["accounts"] for email in client.get("notify_emails", [])]
     for email in notify_emails:
         background_tasks.add_task(send_email, email, f"[{data['name']}] Resultado {datetime.utcnow().strftime('%d/%m/%Y')}", html)
     return {"sent_to": notify_emails}
