@@ -124,7 +124,7 @@ def db_conninfo() -> str:
 def db_connect():
     if psycopg is None:
         raise RuntimeError("psycopg nao esta instalado. Rode pip install -r backend/requirements.txt")
-    return psycopg.connect(db_conninfo(), connect_timeout=8)
+    return psycopg.connect(db_conninfo(), connect_timeout=8, prepare_threshold=None)
 
 
 def ensure_db() -> None:
