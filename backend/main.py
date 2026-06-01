@@ -94,6 +94,7 @@ CACHE_TTL_MINUTES = 15
 _access_log_lock = threading.Lock()
 _db_lock = threading.Lock()
 _db_initialized = False
+_db_error = ""
 LOCAL_TZ = ZoneInfo("America/Sao_Paulo")
 
 
@@ -128,53 +129,64 @@ def db_connect():
 
 
 def ensure_db() -> None:
-    global _db_initialized
+    global _db_initialized, _db_error
     if not db_enabled() or _db_initialized:
         return
     with _db_lock:
         if _db_initialized:
             return
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS copytrader_state (
-                        key TEXT PRIMARY KEY,
-                        value JSONB NOT NULL,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        try:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS copytrader_state (
+                            key TEXT PRIMARY KEY,
+                            value JSONB NOT NULL,
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS copytrader_access_logs (
-                        id BIGSERIAL PRIMARY KEY,
-                        data JSONB NOT NULL,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS copytrader_access_logs (
+                            id BIGSERIAL PRIMARY KEY,
+                            data JSONB NOT NULL,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS copytrader_audit_logs (
-                        id BIGSERIAL PRIMARY KEY,
-                        data JSONB NOT NULL,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS copytrader_audit_logs (
+                            id BIGSERIAL PRIMARY KEY,
+                            data JSONB NOT NULL,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_copytrader_access_logs_created ON copytrader_access_logs (created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_copytrader_audit_logs_created ON copytrader_audit_logs (created_at DESC)")
-            conn.commit()
-        _db_initialized = True
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_copytrader_access_logs_created ON copytrader_access_logs (created_at DESC)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_copytrader_audit_logs_created ON copytrader_audit_logs (created_at DESC)")
+                conn.commit()
+            _db_error = ""
+            _db_initialized = True
+        except Exception as e:
+            _db_error = str(e)
+            print(f"[database] Supabase indisponivel, usando JSON local: {_db_error}")
+            raise
 
 
 def db_read_state(key: str, default):
-    ensure_db()
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT value FROM copytrader_state WHERE key = %s", (key,))
-            row = cur.fetchone()
+    try:
+        ensure_db()
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM copytrader_state WHERE key = %s", (key,))
+                row = cur.fetchone()
+    except Exception as e:
+        global _db_error
+        _db_error = str(e)
+        return default
     if not row:
         return default
     value = row[0]
@@ -182,19 +194,34 @@ def db_read_state(key: str, default):
 
 
 def db_write_state(key: str, data) -> None:
-    ensure_db()
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO copytrader_state (key, value, updated_at)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (key)
-                DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-                """,
-                (key, Jsonb(data)),
-            )
-        conn.commit()
+    try:
+        ensure_db()
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO copytrader_state (key, value, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (key)
+                    DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                    """,
+                    (key, Jsonb(data)),
+                )
+            conn.commit()
+    except Exception as e:
+        global _db_error
+        _db_error = str(e)
+        write_json_file(CLIENT_CONFIG_FILE if key == "client_config" else NOTICE_FILE, data)
+
+
+def db_status() -> dict:
+    if not db_enabled():
+        return {"enabled": False, "ok": False, "mode": "json"}
+    try:
+        ensure_db()
+        return {"enabled": True, "ok": True, "mode": "supabase"}
+    except Exception as e:
+        return {"enabled": True, "ok": False, "mode": "json_fallback", "error": str(e)[:220]}
 
 
 def read_json_file(path: Path, default):
@@ -258,12 +285,16 @@ def update_client_config(slug: str, updates: dict) -> dict:
 def audit_log(actor: str, action: str, target: str, details: dict | None = None) -> None:
     entry = {**local_timestamp(), "actor": actor, "action": action, "target": target, "details": details or {}}
     if db_enabled():
-        ensure_db()
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO copytrader_audit_logs (data) VALUES (%s)", (Jsonb(entry),))
-            conn.commit()
-        return
+        try:
+            ensure_db()
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO copytrader_audit_logs (data) VALUES (%s)", (Jsonb(entry),))
+                conn.commit()
+            return
+        except Exception as e:
+            global _db_error
+            _db_error = str(e)
     logs = read_json_file(AUDIT_LOG_FILE, [])
     logs.append(entry)
     write_json_file(AUDIT_LOG_FILE, logs[-1000:])
@@ -271,11 +302,15 @@ def audit_log(actor: str, action: str, target: str, details: dict | None = None)
 
 def read_audit_logs(limit: int = 200) -> list:
     if db_enabled():
-        ensure_db()
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT data FROM copytrader_audit_logs ORDER BY id DESC LIMIT %s", (limit,))
-                return [row[0] for row in cur.fetchall()]
+        try:
+            ensure_db()
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT data FROM copytrader_audit_logs ORDER BY id DESC LIMIT %s", (limit,))
+                    return [row[0] for row in cur.fetchall()]
+        except Exception as e:
+            global _db_error
+            _db_error = str(e)
     return list(reversed(read_json_file(AUDIT_LOG_FILE, [])[-limit:]))
 
 
@@ -335,11 +370,15 @@ def client_ip(request: Request) -> str:
 
 def read_access_logs(limit: int = 200) -> list:
     if db_enabled():
-        ensure_db()
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT data FROM copytrader_access_logs ORDER BY id DESC LIMIT %s", (limit,))
-                return [row[0] for row in cur.fetchall()]
+        try:
+            ensure_db()
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT data FROM copytrader_access_logs ORDER BY id DESC LIMIT %s", (limit,))
+                    return [row[0] for row in cur.fetchall()]
+        except Exception as e:
+            global _db_error
+            _db_error = str(e)
     if not ACCESS_LOG_FILE.exists():
         return []
     try:
@@ -363,12 +402,16 @@ def write_access_log(event: str, client_slug: str, request: Request, success: bo
         "user_agent": request.headers.get("user-agent", "")[:180],
     }
     if db_enabled():
-        ensure_db()
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO copytrader_access_logs (data) VALUES (%s)", (Jsonb(entry),))
-            conn.commit()
-        return
+        try:
+            ensure_db()
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO copytrader_access_logs (data) VALUES (%s)", (Jsonb(entry),))
+                conn.commit()
+            return
+        except Exception as e:
+            global _db_error
+            _db_error = str(e)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with _access_log_lock:
         logs = []
@@ -647,7 +690,7 @@ async def root():
 
 @app.get("/api/status")
 async def api_status():
-    return {"status": "ok", "service": "CopyTrader Monitor API"}
+    return {"status": "ok", "service": "CopyTrader Monitor API", "database": db_status()}
 
 
 @app.get("/api/exchange-rate")
