@@ -19,6 +19,12 @@ import smtplib
 import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+try:
+    import psycopg
+    from psycopg.types.json import Jsonb
+except Exception:
+    psycopg = None
+    Jsonb = None
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
@@ -47,6 +53,7 @@ TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "12"))
 USD_BRL_RATE = os.getenv("USD_BRL_RATE", "")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 ACCESS_LOG_FILE = DATA_DIR / "access_logs.json"
 NOTICE_FILE = DATA_DIR / "client_notices.json"
@@ -85,6 +92,8 @@ _session_cache = {"session": None, "expires": None}
 _data_cache = {}
 CACHE_TTL_MINUTES = 15
 _access_log_lock = threading.Lock()
+_db_lock = threading.Lock()
+_db_initialized = False
 LOCAL_TZ = ZoneInfo("America/Sao_Paulo")
 
 
@@ -99,6 +108,93 @@ def local_timestamp() -> dict:
         "ts": now.isoformat(timespec="microseconds"),
         "timezone": "America/Sao_Paulo",
     }
+
+
+def db_enabled() -> bool:
+    return bool(DATABASE_URL)
+
+
+def db_conninfo() -> str:
+    if "sslmode=" in DATABASE_URL or "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL:
+        return DATABASE_URL
+    separator = "&" if "?" in DATABASE_URL else "?"
+    return f"{DATABASE_URL}{separator}sslmode=require"
+
+
+def db_connect():
+    if psycopg is None:
+        raise RuntimeError("psycopg nao esta instalado. Rode pip install -r backend/requirements.txt")
+    return psycopg.connect(db_conninfo(), connect_timeout=8)
+
+
+def ensure_db() -> None:
+    global _db_initialized
+    if not db_enabled() or _db_initialized:
+        return
+    with _db_lock:
+        if _db_initialized:
+            return
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS copytrader_state (
+                        key TEXT PRIMARY KEY,
+                        value JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS copytrader_access_logs (
+                        id BIGSERIAL PRIMARY KEY,
+                        data JSONB NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS copytrader_audit_logs (
+                        id BIGSERIAL PRIMARY KEY,
+                        data JSONB NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_copytrader_access_logs_created ON copytrader_access_logs (created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_copytrader_audit_logs_created ON copytrader_audit_logs (created_at DESC)")
+            conn.commit()
+        _db_initialized = True
+
+
+def db_read_state(key: str, default):
+    ensure_db()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM copytrader_state WHERE key = %s", (key,))
+            row = cur.fetchone()
+    if not row:
+        return default
+    value = row[0]
+    return value if isinstance(value, type(default)) else default
+
+
+def db_write_state(key: str, data) -> None:
+    ensure_db()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO copytrader_state (key, value, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (key)
+                DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                """,
+                (key, Jsonb(data)),
+            )
+        conn.commit()
 
 
 def read_json_file(path: Path, default):
@@ -119,10 +215,15 @@ def write_json_file(path: Path, data) -> None:
 
 
 def read_client_config() -> dict:
+    if db_enabled():
+        return db_read_state("client_config", {})
     return read_json_file(CLIENT_CONFIG_FILE, {})
 
 
 def write_client_config(config: dict) -> None:
+    if db_enabled():
+        db_write_state("client_config", config)
+        return
     write_json_file(CLIENT_CONFIG_FILE, config)
 
 
@@ -155,13 +256,26 @@ def update_client_config(slug: str, updates: dict) -> dict:
 
 
 def audit_log(actor: str, action: str, target: str, details: dict | None = None) -> None:
-    logs = read_json_file(AUDIT_LOG_FILE, [])
     entry = {**local_timestamp(), "actor": actor, "action": action, "target": target, "details": details or {}}
+    if db_enabled():
+        ensure_db()
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO copytrader_audit_logs (data) VALUES (%s)", (Jsonb(entry),))
+            conn.commit()
+        return
+    logs = read_json_file(AUDIT_LOG_FILE, [])
     logs.append(entry)
     write_json_file(AUDIT_LOG_FILE, logs[-1000:])
 
 
 def read_audit_logs(limit: int = 200) -> list:
+    if db_enabled():
+        ensure_db()
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT data FROM copytrader_audit_logs ORDER BY id DESC LIMIT %s", (limit,))
+                return [row[0] for row in cur.fetchall()]
     return list(reversed(read_json_file(AUDIT_LOG_FILE, [])[-limit:]))
 
 
@@ -220,6 +334,12 @@ def client_ip(request: Request) -> str:
 
 
 def read_access_logs(limit: int = 200) -> list:
+    if db_enabled():
+        ensure_db()
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT data FROM copytrader_access_logs ORDER BY id DESC LIMIT %s", (limit,))
+                return [row[0] for row in cur.fetchall()]
     if not ACCESS_LOG_FILE.exists():
         return []
     try:
@@ -231,7 +351,6 @@ def read_access_logs(limit: int = 200) -> list:
 
 
 def write_access_log(event: str, client_slug: str, request: Request, success: bool = True, username: str = "") -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     stamp = local_timestamp()
     entry = {
         **stamp,
@@ -243,6 +362,14 @@ def write_access_log(event: str, client_slug: str, request: Request, success: bo
         "ip": client_ip(request),
         "user_agent": request.headers.get("user-agent", "")[:180],
     }
+    if db_enabled():
+        ensure_db()
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO copytrader_access_logs (data) VALUES (%s)", (Jsonb(entry),))
+            conn.commit()
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     with _access_log_lock:
         logs = []
         if ACCESS_LOG_FILE.exists():
@@ -276,6 +403,8 @@ def notice_entry(text: str, scope: str, client_slug: str = "") -> dict:
 
 
 def read_notice_store() -> dict:
+    if db_enabled():
+        return db_read_state("notice_store", {"global": [], "clients": {}})
     if not NOTICE_FILE.exists():
         return {"global": [], "clients": {}}
     try:
@@ -298,6 +427,9 @@ def read_notice_store() -> dict:
 
 
 def write_notice_store(store: dict) -> None:
+    if db_enabled():
+        db_write_state("notice_store", store)
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with NOTICE_FILE.open("w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=2)

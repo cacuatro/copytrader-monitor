@@ -16,6 +16,7 @@ TOKEN_TTL_HOURS=12
 ADMIN_USERNAME=seu_usuario_admin
 ADMIN_PASSWORD=sua_senha_admin_segura
 SUPPORT_WHATSAPP=5548999999999
+DATABASE_URL=postgresql://postgres:SENHA@db.xxxxx.supabase.co:5432/postgres
 ```
 
 Opcional:
@@ -25,6 +26,17 @@ USD_BRL_RATE=5.0000
 ```
 
 Use `USD_BRL_RATE` apenas se quiser fixar manualmente a cotacao USD/BRL. Sem ela, o sistema busca a cotacao automaticamente.
+
+## Supabase
+
+Para manter acessos, comunicados, auditoria e edicoes de clientes salvos apos redeploy/restart do Render:
+
+1. Crie um projeto no Supabase.
+2. Acesse `Project Settings` > `Database` > `Connection string`.
+3. Copie a connection string no formato `postgresql://...`.
+4. No Render, adicione a variavel `DATABASE_URL` com essa URL.
+
+Quando `DATABASE_URL` existir, o sistema cria automaticamente as tabelas `copytrader_state`, `copytrader_access_logs` e `copytrader_audit_logs`.
 
 ## Links
 
