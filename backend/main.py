@@ -553,7 +553,7 @@ def health_from_clients(clients: list) -> dict:
 
 
 def month_ranges_from_year_start():
-    now = datetime.utcnow()
+    now = local_now().replace(tzinfo=None)
     current = datetime(now.year, 1, 1)
     ranges = []
     while current <= now:
@@ -597,7 +597,7 @@ async def get_monthly_gain_series(session: str, account_id: int, flat_gains: lis
 
 
 async def get_period_gain_values(session: str, account_id: int) -> dict:
-    today = datetime.utcnow().date()
+    today = local_now().date()
     ranges = {
         "gain_day": (today, today),
         "gain_week": (today - timedelta(days=7), today),
@@ -647,6 +647,17 @@ async def cached_get(url: str, params: dict) -> dict:
     data = r.json()
     _data_cache[key] = {"data": data, "expires": now + timedelta(minutes=CACHE_TTL_MINUTES)}
     return data
+
+
+def clear_myfxbook_cache() -> int:
+    removed = 0
+    for key in list(_data_cache.keys()):
+        if "myfxbook.com" in key:
+            _data_cache.pop(key, None)
+            removed += 1
+    _session_cache["session"] = None
+    _session_cache["expires"] = None
+    return removed
 
 
 async def get_usd_brl_rate() -> dict:
@@ -823,6 +834,14 @@ async def admin_summary(authorization: Optional[str] = Header(None)):
     }
 
 
+@app.post("/admin/refresh-myfxbook")
+async def refresh_myfxbook(authorization: Optional[str] = Header(None)):
+    require_admin_auth(authorization)
+    removed = clear_myfxbook_cache()
+    audit_log("admin", "myfxbook_refresh", "all", {"cache_entries_removed": removed})
+    return {"refreshed": True, "cache_entries_removed": removed, **local_timestamp()}
+
+
 @app.post("/cliente/{slug}/profile")
 async def update_profile(slug: str, payload: dict, authorization: Optional[str] = Header(None)):
     require_client_auth(slug, authorization)
@@ -907,14 +926,15 @@ async def get_account_data(slug: str):
         accounts_task = cached_get("https://www.myfxbook.com/api/get-my-accounts.json", {"session": session})
         open_trades_task = cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id})
         history_task = cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id})
-        daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": datetime(datetime.utcnow().year, 1, 1).strftime("%Y-%m-%d"), "end": datetime.utcnow().strftime("%Y-%m-%d")})
+        today_local = local_now().date()
+        daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": datetime(today_local.year, 1, 1).strftime("%Y-%m-%d"), "end": today_local.strftime("%Y-%m-%d")})
         accounts_data, open_trades_data, history_data, daily_gain_data = await asyncio.gather(accounts_task, open_trades_task, history_task, daily_gain_task)
         account_detail = next((a for a in accounts_data.get("accounts", []) if a["id"] == account_id), None)
         if not account_detail:
             raise HTTPException(404, "Conta nao encontrada no MyFXBook")
         gains = daily_gain_data.get("dailyGain", [])
         flat_gains = [item for sublist in gains for item in (sublist if isinstance(sublist, list) else [sublist])]
-        today = datetime.utcnow().date()
+        today = local_now().date()
         def sum_period(days_ago):
             cutoff = today - timedelta(days=days_ago)
             total = 0.0
