@@ -67,6 +67,8 @@ ACCOUNTS_MAP = {
     "gold-long": {"id": 11709870, "name": "Gold Long", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "rayla-conta-02": {"id": 12056626, "name": "Rayla Estrategia MT5", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "rayla-estrategias-mt4": {"id": 12038682, "name": "Portfolio Estrategias MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "bresolin-mt4": {"id": 12079050, "name": "Bresolin Portfolio MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "bresolin-mt5": {"id": 12079052, "name": "Bresolin Portfolio MT5", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
 }
 
 CLIENTS_MAP = {
@@ -85,6 +87,14 @@ CLIENTS_MAP = {
         "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
         "notify_emails": [],
         "accounts": ["rayla-conta-02", "rayla-estrategias-mt4"],
+    },
+    "bresolin": {
+        "name": "Bresolin",
+        "username": "bresolin",
+        "password": "Bresolin@2026",
+        "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
+        "notify_emails": [],
+        "accounts": ["bresolin-mt4", "bresolin-mt5"],
     },
 }
 
