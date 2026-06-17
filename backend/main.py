@@ -655,6 +655,8 @@ async def cached_get(url: str, params: dict) -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(url, params=params)
     data = r.json()
+    if data.get("error"):
+        raise HTTPException(502, f"MyFXBook API error: {data.get('message', url)}")
     _data_cache[key] = {"data": data, "expires": now + timedelta(minutes=CACHE_TTL_MINUTES)}
     return data
 
