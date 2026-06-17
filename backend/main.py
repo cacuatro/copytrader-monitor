@@ -639,7 +639,10 @@ async def get_myfxbook_session() -> str:
             "https://www.myfxbook.com/api/login.json",
             params={"email": MYFXBOOK_EMAIL, "password": MYFXBOOK_PASSWORD},
         )
-    data = r.json()
+    try:
+        data = r.json()
+    except Exception:
+        raise HTTPException(502, f"MyFXBook login resposta invalida: HTTP {r.status_code}")
     if data.get("error"):
         raise HTTPException(502, f"MyFXBook login falhou: {data.get('message')}")
     _session_cache["session"] = data["session"]
@@ -655,22 +658,17 @@ async def cached_get(url: str, params: dict) -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(url, params=params)
     if r.status_code != 200 or not r.content:
-        if "session" in params:
-            _session_cache["session"] = None
-            _session_cache["expires"] = None
-        raise HTTPException(502, f"MyFXBook resposta invalida: HTTP {r.status_code} corpo vazio ({url})")
+        raise HTTPException(502, f"MyFXBook resposta invalida: HTTP {r.status_code} ({url})")
     try:
         data = r.json()
     except Exception:
-        if "session" in params:
-            _session_cache["session"] = None
-            _session_cache["expires"] = None
         raise HTTPException(502, f"MyFXBook resposta nao-JSON: {r.text[:200]} ({url})")
     if data.get("error"):
-        if "session" in params:
+        msg = data.get("message", "")
+        if "session" in params and ("session" in msg.lower() or "authorized" in msg.lower() or "login" in msg.lower()):
             _session_cache["session"] = None
             _session_cache["expires"] = None
-        raise HTTPException(502, f"MyFXBook API error: {data.get('message', url)}")
+        raise HTTPException(502, f"MyFXBook API error: {msg} ({url})")
     _data_cache[key] = {"data": data, "expires": now + timedelta(minutes=CACHE_TTL_MINUTES)}
     return data
 
@@ -837,7 +835,9 @@ async def get_client(slug: str, request: Request, authorization: Optional[str] =
 async def admin_summary(authorization: Optional[str] = Header(None)):
     require_admin_auth(authorization)
     clients = []
-    for slug, info in clients_map().items():
+    for i, (slug, info) in enumerate(clients_map().items()):
+        if i > 0:
+            await asyncio.sleep(1)
         try:
             data = await build_client_data(slug)
             last_access = recent_client_access(slug)
