@@ -656,6 +656,9 @@ async def cached_get(url: str, params: dict) -> dict:
         r = await client.get(url, params=params)
     data = r.json()
     if data.get("error"):
+        if "session" in params:
+            _session_cache["session"] = None
+            _session_cache["expires"] = None
         raise HTTPException(502, f"MyFXBook API error: {data.get('message', url)}")
     _data_cache[key] = {"data": data, "expires": now + timedelta(minutes=CACHE_TTL_MINUTES)}
     return data
@@ -933,125 +936,130 @@ async def get_account_data(slug: str):
         raise HTTPException(404, "Conta nao encontrada")
     account_info = ACCOUNTS_MAP[slug]
     account_id = account_info["id"]
-    try:
-        session = await get_myfxbook_session()
-        accounts_task = cached_get("https://www.myfxbook.com/api/get-my-accounts.json", {"session": session})
-        open_trades_task = cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id})
-        history_task = cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id})
-        today_local = local_now().date()
-        daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": datetime(today_local.year, 1, 1).strftime("%Y-%m-%d"), "end": today_local.strftime("%Y-%m-%d")})
-        accounts_data, open_trades_data, history_data, daily_gain_data = await asyncio.gather(accounts_task, open_trades_task, history_task, daily_gain_task)
-        account_detail = next((a for a in accounts_data.get("accounts", []) if a["id"] == account_id), None)
-        if not account_detail:
-            raise HTTPException(404, "Conta nao encontrada no MyFXBook")
-        gains = daily_gain_data.get("dailyGain", [])
-        flat_gains = [item for sublist in gains for item in (sublist if isinstance(sublist, list) else [sublist])]
-        today = local_now().date()
-        def sum_period(days_ago):
-            cutoff = today - timedelta(days=days_ago)
-            total = 0.0
-            for g in flat_gains:
-                try:
-                    d = datetime.strptime(g["date"], "%m/%d/%Y").date()
-                    if d >= cutoff:
-                        total += float(g.get("profit", 0))
-                except Exception:
-                    pass
-            return round(total, 2)
-        profit_day = sum_period(1)
-        profit_week = sum_period(7)
-        profit_month = sum_period(30)
-        growth_series = [{"date": g["date"], "value": round(float(g.get("value", 0)), 4), "profit": round(float(g.get("profit", 0)), 2)} for g in flat_gains]
-        is_cents = account_info.get("cents", False)
-        div = 100.0 if is_cents else 1.0
-        usd_brl = await get_usd_brl_rate()
-        brl_rate = usd_brl["rate"]
-        def to_usd(v):
-            if v is None:
-                return None
-            return round(float(v) / div, 2)
-        def to_brl(v):
-            usd = to_usd(v)
-            if usd is None:
-                return None
-            return round(usd * brl_rate, 2)
-        if is_cents:
-            growth_series = [{**g, "profit": round(g["profit"] / div, 2)} for g in growth_series]
-        monthly_gain_series = await get_monthly_gain_series(session, account_id, flat_gains, div)
-        period_gains = await get_period_gain_values(session, account_id)
-        def normalize_trade_money(trade: dict) -> dict:
-            converted = dict(trade)
-            for field in ("profit", "commission", "swap"):
-                if converted.get(field) is None:
-                    continue
-                try:
-                    converted[field] = round(float(converted[field]) / div, 2)
-                except Exception:
-                    pass
-            return converted
-
-        open_trades = [normalize_trade_money(trade) for trade in open_trades_data.get("openTrades", [])]
-        open_trades_profit = round(sum(float(trade.get("profit") or 0) for trade in open_trades), 2)
-        withdrawals = to_usd(account_detail.get("withdrawals")) or 0
-        commission = to_usd(account_detail.get("commission")) or 0
-        withdrawals_commission = round(withdrawals + commission, 2)
-        history = [
-            {
-                **normalize_trade_money(trade),
-                "openTimeLocal": myfxbook_datetime_to_local(trade.get("openTime")),
-                "closeTimeLocal": myfxbook_datetime_to_local(trade.get("closeTime")),
+    last_exc: Exception = None
+    for attempt in range(2):
+        try:
+            session = await get_myfxbook_session()
+            accounts_task = cached_get("https://www.myfxbook.com/api/get-my-accounts.json", {"session": session})
+            open_trades_task = cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id})
+            history_task = cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id})
+            today_local = local_now().date()
+            daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": datetime(today_local.year, 1, 1).strftime("%Y-%m-%d"), "end": today_local.strftime("%Y-%m-%d")})
+            accounts_data, open_trades_data, history_data, daily_gain_data = await asyncio.gather(accounts_task, open_trades_task, history_task, daily_gain_task)
+            account_detail = next((a for a in accounts_data.get("accounts", []) if a["id"] == account_id), None)
+            if not account_detail:
+                raise HTTPException(404, "Conta nao encontrada no MyFXBook")
+            gains = daily_gain_data.get("dailyGain", [])
+            flat_gains = [item for sublist in gains for item in (sublist if isinstance(sublist, list) else [sublist])]
+            today = local_now().date()
+            def sum_period(days_ago):
+                cutoff = today - timedelta(days=days_ago)
+                total = 0.0
+                for g in flat_gains:
+                    try:
+                        d = datetime.strptime(g["date"], "%m/%d/%Y").date()
+                        if d >= cutoff:
+                            total += float(g.get("profit", 0))
+                    except Exception:
+                        pass
+                return round(total, 2)
+            profit_day = sum_period(1)
+            profit_week = sum_period(7)
+            profit_month = sum_period(30)
+            growth_series = [{"date": g["date"], "value": round(float(g.get("value", 0)), 4), "profit": round(float(g.get("profit", 0)), 2)} for g in flat_gains]
+            is_cents = account_info.get("cents", False)
+            div = 100.0 if is_cents else 1.0
+            usd_brl = await get_usd_brl_rate()
+            brl_rate = usd_brl["rate"]
+            def to_usd(v):
+                if v is None:
+                    return None
+                return round(float(v) / div, 2)
+            def to_brl(v):
+                usd = to_usd(v)
+                if usd is None:
+                    return None
+                return round(usd * brl_rate, 2)
+            if is_cents:
+                growth_series = [{**g, "profit": round(g["profit"] / div, 2)} for g in growth_series]
+            monthly_gain_series = await get_monthly_gain_series(session, account_id, flat_gains, div)
+            period_gains = await get_period_gain_values(session, account_id)
+            def normalize_trade_money(trade: dict) -> dict:
+                converted = dict(trade)
+                for field in ("profit", "commission", "swap"):
+                    if converted.get(field) is None:
+                        continue
+                    try:
+                        converted[field] = round(float(converted[field]) / div, 2)
+                    except Exception:
+                        pass
+                return converted
+            open_trades = [normalize_trade_money(trade) for trade in open_trades_data.get("openTrades", [])]
+            open_trades_profit = round(sum(float(trade.get("profit") or 0) for trade in open_trades), 2)
+            withdrawals = to_usd(account_detail.get("withdrawals")) or 0
+            commission = to_usd(account_detail.get("commission")) or 0
+            withdrawals_commission = round(withdrawals + commission, 2)
+            history = [
+                {
+                    **normalize_trade_money(trade),
+                    "openTimeLocal": myfxbook_datetime_to_local(trade.get("openTime")),
+                    "closeTimeLocal": myfxbook_datetime_to_local(trade.get("closeTime")),
+                }
+                for trade in history_data.get("history", [])[:30]
+            ]
+            return {
+                "slug": slug,
+                "name": account_info["name"],
+                "description": account_info["description"],
+                "pair": account_info["pair"],
+                "cents": is_cents,
+                "usd_brl_rate": brl_rate,
+                "exchange_rate_source": usd_brl["source"],
+                "exchange_rate_updated_at": usd_brl.get("updated_at"),
+                "balance": to_usd(account_detail.get("balance")),
+                "balance_brl": to_brl(account_detail.get("balance")),
+                "equity": to_usd(account_detail.get("equity")),
+                "equity_brl": to_brl(account_detail.get("equity")),
+                "gain": account_detail.get("gain"),
+                "drawdown": account_detail.get("drawdown"),
+                "profit": to_usd(account_detail.get("profit")),
+                "profit_brl": to_brl(account_detail.get("profit")),
+                "withdrawals": withdrawals,
+                "withdrawals_brl": round(withdrawals * brl_rate, 2),
+                "commission": commission,
+                "commission_brl": round(commission * brl_rate, 2),
+                "withdrawals_commission": withdrawals_commission,
+                "withdrawals_commission_brl": round(withdrawals_commission * brl_rate, 2),
+                "demo": account_detail.get("demo", False),
+                "lastUpdateDate": account_detail.get("lastUpdateDate"),
+                "myfxbook_updated_at": account_detail.get("lastUpdateDate"),
+                "profit_day": round(profit_day / div, 2),
+                "gain_day": period_gains.get("gain_day"),
+                "profit_day_brl": round((profit_day / div) * brl_rate, 2),
+                "profit_week": round(profit_week / div, 2),
+                "gain_week": period_gains.get("gain_week"),
+                "profit_week_brl": round((profit_week / div) * brl_rate, 2),
+                "profit_month": round(profit_month / div, 2),
+                "gain_month": period_gains.get("gain_month"),
+                "profit_month_brl": round((profit_month / div) * brl_rate, 2),
+                "profit_total": to_usd(account_detail.get("profit")),
+                "profit_total_brl": to_brl(account_detail.get("profit")),
+                "growth_series": growth_series,
+                "monthly_gain_series": monthly_gain_series,
+                "open_trades_count": len(open_trades),
+                "open_trades_profit": open_trades_profit,
+                "open_trades_profit_brl": round(open_trades_profit * brl_rate, 2),
+                "open_trades": open_trades,
+                "history": history,
             }
-            for trade in history_data.get("history", [])[:30]
-        ]
-        return {
-            "slug": slug,
-            "name": account_info["name"],
-            "description": account_info["description"],
-            "pair": account_info["pair"],
-            "cents": is_cents,
-            "usd_brl_rate": brl_rate,
-            "exchange_rate_source": usd_brl["source"],
-            "exchange_rate_updated_at": usd_brl.get("updated_at"),
-            "balance": to_usd(account_detail.get("balance")),
-            "balance_brl": to_brl(account_detail.get("balance")),
-            "equity": to_usd(account_detail.get("equity")),
-            "equity_brl": to_brl(account_detail.get("equity")),
-            "gain": account_detail.get("gain"),
-            "drawdown": account_detail.get("drawdown"),
-            "profit": to_usd(account_detail.get("profit")),
-            "profit_brl": to_brl(account_detail.get("profit")),
-            "withdrawals": withdrawals,
-            "withdrawals_brl": round(withdrawals * brl_rate, 2),
-            "commission": commission,
-            "commission_brl": round(commission * brl_rate, 2),
-            "withdrawals_commission": withdrawals_commission,
-            "withdrawals_commission_brl": round(withdrawals_commission * brl_rate, 2),
-            "demo": account_detail.get("demo", False),
-            "lastUpdateDate": account_detail.get("lastUpdateDate"),
-            "myfxbook_updated_at": account_detail.get("lastUpdateDate"),
-            "profit_day": round(profit_day / div, 2),
-            "gain_day": period_gains.get("gain_day"),
-            "profit_day_brl": round((profit_day / div) * brl_rate, 2),
-            "profit_week": round(profit_week / div, 2),
-            "gain_week": period_gains.get("gain_week"),
-            "profit_week_brl": round((profit_week / div) * brl_rate, 2),
-            "profit_month": round(profit_month / div, 2),
-            "gain_month": period_gains.get("gain_month"),
-            "profit_month_brl": round((profit_month / div) * brl_rate, 2),
-            "profit_total": to_usd(account_detail.get("profit")),
-            "profit_total_brl": to_brl(account_detail.get("profit")),
-            "growth_series": growth_series,
-            "monthly_gain_series": monthly_gain_series,
-            "open_trades_count": len(open_trades),
-            "open_trades_profit": open_trades_profit,
-            "open_trades_profit_brl": round(open_trades_profit * brl_rate, 2),
-            "open_trades": open_trades,
-            "history": history,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Erro ao buscar dados: {str(e)}")
+        except HTTPException as e:
+            if attempt == 0 and e.status_code == 502:
+                last_exc = e
+                continue
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Erro ao buscar dados: {str(e)}")
+    raise last_exc
 
 
 def send_email(to: str, subject: str, html_body: str):
