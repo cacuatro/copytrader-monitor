@@ -757,12 +757,12 @@ async def login(credentials: dict, request: Request):
     return {"token": make_token(client_slug), "role": "client", "client_slug": client_slug, "name": all_clients[client_slug]["name"], "expires_in_hours": TOKEN_TTL_HOURS}
 
 
-async def build_client_data(slug: str) -> dict:
+async def build_client_data(slug: str, lite: bool = False) -> dict:
     client_info = get_client_info(slug)
     results = []
     for acc_slug in client_info["accounts"]:
         try:
-            results.append(await get_account_data(acc_slug))
+            results.append(await get_account_data(acc_slug, lite=lite))
         except Exception as e:
             results.append({"slug": acc_slug, "name": ACCOUNTS_MAP.get(acc_slug, {}).get("name", acc_slug), "error": str(e)})
     ok = [a for a in results if not a.get("error")]
@@ -839,7 +839,7 @@ async def admin_summary(authorization: Optional[str] = Header(None)):
         if i > 0:
             await asyncio.sleep(1)
         try:
-            data = await build_client_data(slug)
+            data = await build_client_data(slug, lite=True)
             last_access = recent_client_access(slug)
             clients.append({
                 "slug": slug,
@@ -942,7 +942,7 @@ async def get_account(slug: str, authorization: Optional[str] = Header(None)):
     return await get_account_data(slug)
 
 
-async def get_account_data(slug: str):
+async def get_account_data(slug: str, lite: bool = False):
     if slug not in ACCOUNTS_MAP:
         raise HTTPException(404, "Conta nao encontrada")
     account_info = ACCOUNTS_MAP[slug]
@@ -951,12 +951,17 @@ async def get_account_data(slug: str):
     for attempt in range(2):
         try:
             session = await get_myfxbook_session()
-            accounts_task = cached_get("https://www.myfxbook.com/api/get-my-accounts.json", {"session": session})
-            open_trades_task = cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id})
-            history_task = cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id})
             today_local = local_now().date()
+            accounts_task = cached_get("https://www.myfxbook.com/api/get-my-accounts.json", {"session": session})
             daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": datetime(today_local.year, 1, 1).strftime("%Y-%m-%d"), "end": today_local.strftime("%Y-%m-%d")})
-            accounts_data, open_trades_data, history_data, daily_gain_data = await asyncio.gather(accounts_task, open_trades_task, history_task, daily_gain_task)
+            if lite:
+                accounts_data, daily_gain_data = await asyncio.gather(accounts_task, daily_gain_task)
+                open_trades_data = {"openTrades": []}
+                history_data = {"history": []}
+            else:
+                open_trades_task = cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id})
+                history_task = cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id})
+                accounts_data, open_trades_data, history_data, daily_gain_data = await asyncio.gather(accounts_task, open_trades_task, history_task, daily_gain_task)
             account_detail = next((a for a in accounts_data.get("accounts", []) if a["id"] == account_id), None)
             if not account_detail:
                 raise HTTPException(404, "Conta nao encontrada no MyFXBook")
@@ -993,8 +998,12 @@ async def get_account_data(slug: str):
                 return round(usd * brl_rate, 2)
             if is_cents:
                 growth_series = [{**g, "profit": round(g["profit"] / div, 2)} for g in growth_series]
-            monthly_gain_series = await get_monthly_gain_series(session, account_id, flat_gains, div)
-            period_gains = await get_period_gain_values(session, account_id)
+            if lite:
+                monthly_gain_series = []
+                period_gains = {}
+            else:
+                monthly_gain_series = await get_monthly_gain_series(session, account_id, flat_gains, div)
+                period_gains = await get_period_gain_values(session, account_id)
             def normalize_trade_money(trade: dict) -> dict:
                 converted = dict(trade)
                 for field in ("profit", "commission", "swap"):
