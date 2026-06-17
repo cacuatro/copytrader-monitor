@@ -654,7 +654,18 @@ async def cached_get(url: str, params: dict) -> dict:
         return _data_cache[key]["data"]
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(url, params=params)
-    data = r.json()
+    if r.status_code != 200 or not r.content:
+        if "session" in params:
+            _session_cache["session"] = None
+            _session_cache["expires"] = None
+        raise HTTPException(502, f"MyFXBook resposta invalida: HTTP {r.status_code} corpo vazio ({url})")
+    try:
+        data = r.json()
+    except Exception:
+        if "session" in params:
+            _session_cache["session"] = None
+            _session_cache["expires"] = None
+        raise HTTPException(502, f"MyFXBook resposta nao-JSON: {r.text[:200]} ({url})")
     if data.get("error"):
         if "session" in params:
             _session_cache["session"] = None
