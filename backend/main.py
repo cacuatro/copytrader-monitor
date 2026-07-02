@@ -94,7 +94,7 @@ CLIENTS_MAP = {
         "password": "Bresolin@2026",
         "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
         "notify_emails": [],
-        "accounts": ["bresolin-mt4", "bresolin-mt5"],
+        "accounts": ["bresolin-mt4"],
     },
 }
 
