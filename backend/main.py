@@ -69,6 +69,11 @@ ACCOUNTS_MAP = {
     "rayla-estrategias-mt4": {"id": 12038682, "name": "Portfolio Estrategias MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "bresolin-mt4": {"id": 12079050, "name": "Bresolin Portfolio MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "bresolin-mt5": {"id": 12079052, "name": "Bresolin Portfolio MT5", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "gabrielly-gold-reaper": {"id": 12110642, "name": "Gabrielly Gold Reaper", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "gabrielly-portfolio-invictus": {"id": 12110644, "name": "Gabrielly Portfolio + Invictus", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "gabrielly-gold-ia": {"id": 12110646, "name": "Gabrielly Gold IA", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "gabrielly-goldest": {"id": 12110648, "name": "Gabrielly Goldest", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "gabrielly-gold-dragon": {"id": 12110650, "name": "Gabrielly Gold Dragon", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
 }
 
 CLIENTS_MAP = {
@@ -95,6 +100,14 @@ CLIENTS_MAP = {
         "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
         "notify_emails": [],
         "accounts": ["bresolin-mt4"],
+    },
+    "gabrielly": {
+        "name": "Gabrielly",
+        "username": "gabrielly",
+        "password": "Gabrielly@2026",
+        "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
+        "notify_emails": [],
+        "accounts": ["gabrielly-gold-reaper", "gabrielly-portfolio-invictus", "gabrielly-gold-ia", "gabrielly-goldest", "gabrielly-gold-dragon"],
     },
 }
 
