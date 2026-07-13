@@ -51,6 +51,7 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 AUTH_SECRET = os.getenv("AUTH_SECRET", "troque-este-segredo-em-producao")
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "12"))
 USD_BRL_RATE = os.getenv("USD_BRL_RATE", "")
+COMMISSION_RATE = float(os.getenv("COMMISSION_RATE", "0.30"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -794,6 +795,7 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
     total_profit_day = sum(float(a.get("profit_day") or 0) for a in ok)
     total_profit_week = sum(float(a.get("profit_week") or 0) for a in ok)
     total_profit_month = sum(float(a.get("profit_month") or 0) for a in ok)
+    total_profit_year = sum(float(a.get("profit_year") or 0) for a in ok)
     total_profit_total = sum(float(a.get("profit_total") or 0) for a in ok)
     total_withdrawals_commission = sum(float(a.get("withdrawals_commission") or 0) for a in ok)
     total_open_trades = sum(int(a.get("open_trades_count") or 0) for a in ok)
@@ -805,7 +807,13 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
     total_gain_day = consolidated_gain(total_profit_day)
     total_gain_week = consolidated_gain(total_profit_week)
     total_gain_month = consolidated_gain(total_profit_month)
+    total_gain_year = consolidated_gain(total_profit_year)
     total_gain_total = consolidated_gain(total_profit_total)
+    commission_day = round(total_profit_day * COMMISSION_RATE, 2)
+    commission_week = round(total_profit_week * COMMISSION_RATE, 2)
+    commission_month = round(total_profit_month * COMMISSION_RATE, 2)
+    commission_year = round(total_profit_year * COMMISSION_RATE, 2)
+    commission_total = round(total_profit_total * COMMISSION_RATE, 2)
     usd_brl = await get_usd_brl_rate()
     brl_rate = usd_brl["rate"]
     manual_withdrawals = round(float(client_info.get("manual_withdrawals") or 0), 2)
@@ -842,9 +850,23 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
         "total_profit_month": round(total_profit_month, 2),
         "total_gain_month": total_gain_month,
         "total_profit_month_brl": round(total_profit_month * brl_rate, 2),
+        "total_profit_year": round(total_profit_year, 2),
+        "total_gain_year": total_gain_year,
+        "total_profit_year_brl": round(total_profit_year * brl_rate, 2),
         "total_profit_total": round(total_profit_total, 2),
         "total_gain_total": total_gain_total,
         "total_profit_total_brl": round(total_profit_total * brl_rate, 2),
+        "commission_rate": COMMISSION_RATE,
+        "commission_day": commission_day,
+        "commission_day_brl": round(commission_day * brl_rate, 2),
+        "commission_week": commission_week,
+        "commission_week_brl": round(commission_week * brl_rate, 2),
+        "commission_month": commission_month,
+        "commission_month_brl": round(commission_month * brl_rate, 2),
+        "commission_year": commission_year,
+        "commission_year_brl": round(commission_year * brl_rate, 2),
+        "commission_total": commission_total,
+        "commission_total_brl": round(commission_total * brl_rate, 2),
     }
 
 
@@ -1003,9 +1025,20 @@ async def get_account_data(slug: str, lite: bool = False):
                     except Exception:
                         pass
                 return round(total, 2)
+            def sum_since(cutoff_date):
+                total = 0.0
+                for g in flat_gains:
+                    try:
+                        d = datetime.strptime(g["date"], "%m/%d/%Y").date()
+                        if d >= cutoff_date:
+                            total += float(g.get("profit", 0))
+                    except Exception:
+                        pass
+                return round(total, 2)
             profit_day = sum_period(1)
             profit_week = sum_period(7)
             profit_month = sum_period(30)
+            profit_year = sum_since(today.replace(month=1, day=1))
             growth_series = [{"date": g["date"], "value": round(float(g.get("value", 0)), 4), "profit": round(float(g.get("profit", 0)), 2)} for g in flat_gains]
             is_cents = account_info.get("cents", False)
             div = 100.0 if is_cents else 1.0
@@ -1086,6 +1119,8 @@ async def get_account_data(slug: str, lite: bool = False):
                 "profit_month": round(profit_month / div, 2),
                 "gain_month": period_gains.get("gain_month"),
                 "profit_month_brl": round((profit_month / div) * brl_rate, 2),
+                "profit_year": round(profit_year / div, 2),
+                "profit_year_brl": round((profit_year / div) * brl_rate, 2),
                 "profit_total": to_usd(account_detail.get("profit")),
                 "profit_total_brl": to_brl(account_detail.get("profit")),
                 "growth_series": growth_series,
