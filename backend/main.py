@@ -74,6 +74,9 @@ ACCOUNTS_MAP = {
     "gabrielly-gold-ia": {"id": 12110646, "name": "Gabrielly Gold IA", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "gabrielly-goldest": {"id": 12110648, "name": "Gabrielly Goldest", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "gabrielly-gold-dragon": {"id": 12110650, "name": "Gabrielly Gold Dragon", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "jocelia-portfolio-mt4": {"id": 12112614, "name": "Jocelia Portfolio MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "jocelia-goldest": {"id": 12112615, "name": "Jocelia Goldest", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "jocelia-gold-dragon": {"id": 12112618, "name": "Jocelia Gold Dragon", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
 }
 
 CLIENTS_MAP = {
@@ -108,6 +111,14 @@ CLIENTS_MAP = {
         "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
         "notify_emails": [],
         "accounts": ["gabrielly-gold-reaper", "gabrielly-portfolio-invictus", "gabrielly-gold-ia", "gabrielly-goldest", "gabrielly-gold-dragon"],
+    },
+    "jocelia": {
+        "name": "Jocelia",
+        "username": "jocelia",
+        "password": "Jocelia@2026",
+        "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
+        "notify_emails": [],
+        "accounts": ["jocelia-portfolio-mt4", "jocelia-goldest", "jocelia-gold-dragon"],
     },
 }
 
