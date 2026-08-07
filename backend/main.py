@@ -60,6 +60,7 @@ ACCESS_LOG_FILE = DATA_DIR / "access_logs.json"
 NOTICE_FILE = DATA_DIR / "client_notices.json"
 CLIENT_CONFIG_FILE = DATA_DIR / "client_config.json"
 AUDIT_LOG_FILE = DATA_DIR / "audit_logs.json"
+STRATEGY_ADJUSTMENTS_FILE = DATA_DIR / "strategy_adjustments.json"
 SUPPORT_WHATSAPP = os.getenv("SUPPORT_WHATSAPP", "")
 
 ACCOUNTS_MAP = {
@@ -228,6 +229,13 @@ def db_read_state(key: str, default):
     return value if isinstance(value, type(default)) else default
 
 
+STATE_FALLBACK_FILES = {
+    "client_config": CLIENT_CONFIG_FILE,
+    "notice_store": NOTICE_FILE,
+    "strategy_adjustments": STRATEGY_ADJUSTMENTS_FILE,
+}
+
+
 def db_write_state(key: str, data) -> None:
     try:
         ensure_db()
@@ -246,7 +254,8 @@ def db_write_state(key: str, data) -> None:
     except Exception as e:
         global _db_error
         _db_error = str(e)
-        write_json_file(CLIENT_CONFIG_FILE if key == "client_config" else NOTICE_FILE, data)
+        fallback_file = STATE_FALLBACK_FILES.get(key, NOTICE_FILE)
+        write_json_file(fallback_file, data)
 
 
 def db_status() -> dict:
@@ -315,6 +324,26 @@ def update_client_config(slug: str, updates: dict) -> dict:
     config[slug] = current
     write_client_config(config)
     return clients_map()[slug]
+
+
+def read_strategy_adjustments() -> dict:
+    if db_enabled():
+        return db_read_state("strategy_adjustments", {})
+    return read_json_file(STRATEGY_ADJUSTMENTS_FILE, {})
+
+
+def write_strategy_adjustments(data: dict) -> None:
+    if db_enabled():
+        db_write_state("strategy_adjustments", data)
+        return
+    write_json_file(STRATEGY_ADJUSTMENTS_FILE, data)
+
+
+def get_strategy_adjustment(slug: str) -> dict:
+    entry = read_strategy_adjustments().get(slug)
+    if not isinstance(entry, dict):
+        return {"value": 0.0, "reason": "", "at": ""}
+    return entry
 
 
 def audit_log(actor: str, action: str, target: str, details: dict | None = None) -> None:
@@ -979,6 +1008,41 @@ async def update_global_notice(payload: dict, authorization: Optional[str] = Hea
     return {"notice": entry}
 
 
+@app.post("/admin/strategy-adjustment/{slug}")
+async def update_strategy_adjustment(slug: str, payload: dict, authorization: Optional[str] = Header(None)):
+    require_admin_auth(authorization)
+    if slug not in ACCOUNTS_MAP:
+        raise HTTPException(404, "Estrategia nao encontrada")
+    reason = str(payload.get("reason", "")).strip()
+    if not reason:
+        raise HTTPException(400, "Informe o motivo do ajuste (ex: divergencia de sincronizacao com a MyFXBook)")
+    try:
+        value = round(float(payload.get("value", 0) or 0), 2)
+    except Exception:
+        raise HTTPException(400, "Valor de ajuste invalido")
+    for_date = str(payload.get("for_date", "")).strip()
+    if not for_date:
+        for_date = local_now().strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(for_date, "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(400, "Data de referencia invalida (use AAAA-MM-DD)")
+    adjustments = read_strategy_adjustments()
+    previous = adjustments.get(slug) if isinstance(adjustments.get(slug), dict) else {}
+    entry = {"value": value, "reason": reason, "for_date": for_date, **local_timestamp()}
+    adjustments[slug] = entry
+    write_strategy_adjustments(adjustments)
+    audit_log("admin", "strategy_adjustment", slug, {
+        "previous_value": previous.get("value", 0),
+        "previous_reason": previous.get("reason", ""),
+        "previous_for_date": previous.get("for_date", ""),
+        "new_value": value,
+        "reason": reason,
+        "for_date": for_date,
+    })
+    return {"slug": slug, "adjustment": entry}
+
+
 @app.get("/account/{slug}")
 async def get_account(slug: str, authorization: Optional[str] = Header(None)):
     allowed_client = next((client_slug for client_slug, info in clients_map().items() if slug in info["accounts"]), None)
@@ -1076,6 +1140,28 @@ async def get_account_data(slug: str, lite: bool = False):
             withdrawals = to_usd(account_detail.get("withdrawals")) or 0
             commission = to_usd(account_detail.get("commission")) or 0
             withdrawals_commission = round(withdrawals + commission, 2)
+            adjustment = get_strategy_adjustment(slug)
+            adjustment_value = round(float(adjustment.get("value", 0) or 0), 2)
+            adjustment_reason = adjustment.get("reason", "")
+            adjustment_for_date_str = adjustment.get("for_date", "")
+            try:
+                adjustment_for_date = datetime.strptime(adjustment_for_date_str, "%Y-%m-%d").date() if adjustment_for_date_str else None
+            except Exception:
+                adjustment_for_date = None
+            def adjustment_in_period(days_ago: int) -> bool:
+                if adjustment_for_date is None or not adjustment_value:
+                    return False
+                return adjustment_for_date >= (today - timedelta(days=days_ago))
+            adj_day = adjustment_value if adjustment_in_period(1) else 0.0
+            adj_week = adjustment_value if adjustment_in_period(7) else 0.0
+            adj_month = adjustment_value if adjustment_in_period(30) else 0.0
+            adj_year = adjustment_value if (adjustment_for_date and adjustment_value and adjustment_for_date >= today.replace(month=1, day=1)) else 0.0
+            raw_balance = to_usd(account_detail.get("balance"))
+            raw_profit_total = to_usd(account_detail.get("profit"))
+            adj_balance = round(raw_balance + adjustment_value, 2) if raw_balance is not None else raw_balance
+            adj_profit_total = round(raw_profit_total + adjustment_value, 2) if raw_profit_total is not None else raw_profit_total
+            adj_balance_brl = round(adj_balance * brl_rate, 2) if adj_balance is not None else None
+            adj_profit_total_brl = round(adj_profit_total * brl_rate, 2) if adj_profit_total is not None else None
             history = [
                 {
                     **normalize_trade_money(trade),
@@ -1093,14 +1179,16 @@ async def get_account_data(slug: str, lite: bool = False):
                 "usd_brl_rate": brl_rate,
                 "exchange_rate_source": usd_brl["source"],
                 "exchange_rate_updated_at": usd_brl.get("updated_at"),
-                "balance": to_usd(account_detail.get("balance")),
-                "balance_brl": to_brl(account_detail.get("balance")),
+                "balance": adj_balance,
+                "balance_brl": adj_balance_brl,
+                "balance_raw": raw_balance,
+                "balance_raw_brl": to_brl(account_detail.get("balance")),
                 "equity": to_usd(account_detail.get("equity")),
                 "equity_brl": to_brl(account_detail.get("equity")),
                 "gain": account_detail.get("gain"),
                 "drawdown": account_detail.get("drawdown"),
-                "profit": to_usd(account_detail.get("profit")),
-                "profit_brl": to_brl(account_detail.get("profit")),
+                "profit": adj_profit_total,
+                "profit_brl": adj_profit_total_brl,
                 "withdrawals": withdrawals,
                 "withdrawals_brl": round(withdrawals * brl_rate, 2),
                 "commission": commission,
@@ -1110,19 +1198,26 @@ async def get_account_data(slug: str, lite: bool = False):
                 "demo": account_detail.get("demo", False),
                 "lastUpdateDate": account_detail.get("lastUpdateDate"),
                 "myfxbook_updated_at": account_detail.get("lastUpdateDate"),
-                "profit_day": round(profit_day / div, 2),
+                "profit_day": round(profit_day / div + adj_day, 2),
                 "gain_day": period_gains.get("gain_day"),
-                "profit_day_brl": round((profit_day / div) * brl_rate, 2),
-                "profit_week": round(profit_week / div, 2),
+                "profit_day_brl": round((profit_day / div + adj_day) * brl_rate, 2),
+                "profit_week": round(profit_week / div + adj_week, 2),
                 "gain_week": period_gains.get("gain_week"),
-                "profit_week_brl": round((profit_week / div) * brl_rate, 2),
-                "profit_month": round(profit_month / div, 2),
+                "profit_week_brl": round((profit_week / div + adj_week) * brl_rate, 2),
+                "profit_month": round(profit_month / div + adj_month, 2),
                 "gain_month": period_gains.get("gain_month"),
-                "profit_month_brl": round((profit_month / div) * brl_rate, 2),
-                "profit_year": round(profit_year / div, 2),
-                "profit_year_brl": round((profit_year / div) * brl_rate, 2),
-                "profit_total": to_usd(account_detail.get("profit")),
-                "profit_total_brl": to_brl(account_detail.get("profit")),
+                "profit_month_brl": round((profit_month / div + adj_month) * brl_rate, 2),
+                "profit_year": round(profit_year / div + adj_year, 2),
+                "profit_year_brl": round((profit_year / div + adj_year) * brl_rate, 2),
+                "profit_total": adj_profit_total,
+                "profit_total_brl": adj_profit_total_brl,
+                "profit_total_raw": raw_profit_total,
+                "profit_total_raw_brl": to_brl(account_detail.get("profit")),
+                "adjustment_value": adjustment_value,
+                "adjustment_value_brl": round(adjustment_value * brl_rate, 2),
+                "adjustment_reason": adjustment_reason,
+                "adjustment_for_date": adjustment_for_date_str,
+                "adjustment_at": adjustment.get("at", ""),
                 "growth_series": growth_series,
                 "monthly_gain_series": monthly_gain_series,
                 "open_trades_count": len(open_trades),
