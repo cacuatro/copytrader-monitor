@@ -79,6 +79,8 @@ ACCOUNTS_MAP = {
     "jocelia-portfolio-mt4": {"id": 12112614, "name": "Portfolio MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "jocelia-goldest": {"id": 12112615, "name": "Goldest", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
     "jocelia-gold-dragon": {"id": 12112618, "name": "Gold Dragon", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "samira-mt5": {"id": 12185469, "name": "MT5", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
+    "samira-mt4": {"id": 12185472, "name": "MT4", "description": "Estrategia em XAUUSD", "pair": "XAUUSD", "cents": True},
 }
 
 CLIENTS_MAP = {
@@ -121,6 +123,14 @@ CLIENTS_MAP = {
         "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
         "notify_emails": [],
         "accounts": ["jocelia-portfolio-mt4", "jocelia-goldest", "jocelia-gold-dragon"],
+    },
+    "samira": {
+        "name": "Samira",
+        "username": "samira",
+        "password": "Samira@2026",
+        "notice": "Acompanhe aqui os resultados consolidados das estrategias vinculadas ao seu acesso.",
+        "notify_emails": [],
+        "accounts": ["samira-mt5", "samira-mt4"],
     },
 }
 
