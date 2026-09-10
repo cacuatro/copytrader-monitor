@@ -6,10 +6,20 @@ function accountStatus(c){return c.error||!c.data||c.data.data_unavailable?'miss
 renderAdminClient=function(c,period='month',strategyFilter=''){
  const d=c.data||{},state=accountStatus(c),missing=state==='missing',pv=periodValue(d,period);
  const names=(d.accounts||[]).map(a=>a.name).filter(Boolean).join(', ');
- return `<details class="client-record"><summary><div class="record-name"><span class="avatar">${esc(initials(c.name))}</span><span>${esc(c.name)}<small>${esc(c.username||'')}</small></span></div><div class="record-strategies">${esc(names||'Sem dados')}</div><div class="record-balance">${missing?'—':fmtBalance(d.total_balance)}</div><div class="${missing?'n':col(pv[0])}">${missing?'—':fmtMoney(pv[0])}</div><div class="record-date">${esc(savedDate(d.last_success_at))}</div><div class="record-status ${state}"><span class="status-dot"></span>${missing?'Indisponível':state==='stale'?'Dados salvos':'Atualizado'}</div><span class="record-toggle">Ver</span></summary>${originalRenderAdminClient(c,period,strategyFilter)}</details>`;
+ return `<details class="client-record" data-client-slug="${esc(c.slug)}"><summary><div class="record-name"><span class="avatar">${esc(initials(c.name))}</span><span>${esc(c.name)}<small>${esc(c.username||'')}</small></span></div><div class="record-strategies">${esc(names||'Sem dados')}</div><div class="record-balance">${missing?'—':fmtBalance(d.total_balance)}</div><div class="${missing?'n':col(pv[0])}">${missing?'—':fmtMoney(pv[0])}</div><div class="record-date">${esc(savedDate(d.last_success_at))}</div><div class="record-status ${state}"><span class="status-dot"></span>${missing?'Indisponível':state==='stale'?'Dados salvos':'Atualizado'}</div><span class="record-toggle">Ver</span></summary>${originalRenderAdminClient(c,period,strategyFilter)}</details>`;
 };
 const referenceRenderAdmin=renderAdmin;
-renderAdmin=function(d){referenceRenderAdmin(d);const h=d.health||{};document.getElementById('syncCounts').innerHTML=`<span class="sync-chip fresh">${Number(h.ok)||0} atualizadas</span><span class="sync-chip stale">${Number(h.stale)||0} precisam de atenção</span>`;document.getElementById('adminAvatar').textContent='AD';};
+function updateStrategyFilter(d){
+ const select=document.getElementById('filterStrategy'),selected=select.value;
+ const names=[...new Set((d.clients||[]).flatMap(c=>(c.data?.accounts||[]).map(a=>a.name).filter(Boolean)))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+ select.replaceChildren(new Option('Todas as estratégias',''),...names.map(name=>new Option(name,name.toLowerCase())));
+ if(names.some(name=>name.toLowerCase()===selected))select.value=selected;
+}
+function clearAdminFilters(){
+ for(const id of ['filterClient','filterStrategy','filterStatus'])document.getElementById(id).value='';
+ if(adminData)renderAdmin(adminData);
+}
+renderAdmin=function(d){updateStrategyFilter(d);referenceRenderAdmin(d);const h=d.health||{};document.getElementById('syncCounts').innerHTML=`<span class="sync-chip fresh">${Number(h.ok)||0} atualizadas</span><span class="sync-chip stale">${Number(h.stale)||0} precisam de atenção</span>`;document.getElementById('adminAvatar').textContent='AD';};
 const referenceRenderClient=render;
 render=function(d){referenceRenderClient(d);document.getElementById('clientAvatar').textContent=initials(d.name);document.getElementById('clientSub').textContent='Acompanhe seus resultados.';};
 const referenceCards=renderCards;
@@ -36,7 +46,8 @@ function referenceLayout(){
  const sync=document.createElement('div');sync.className='sync-strip';sync.innerHTML=`${uiIcon('refresh')}<strong>Sincronização das contas</strong><div id="syncCounts"></div>`;adm.querySelector('.summary').after(sync);
  const clientRows=document.getElementById('adminClients'),filters=document.getElementById('filterClient').closest('.detail');filters.classList.add('client-toolbar');filters.querySelector('.detail-title').textContent='Clientes';filters.querySelector('.detail-sub').remove();filters.querySelector('.detail-head>button').remove();
  const refresh=health.querySelector('button');refresh.classList.add('primary-action');refresh.textContent='↻ Atualizar dados';filters.querySelector('.admin-stats').prepend(refresh);
- const status=document.createElement('select');status.id='filterStatus';status.className='login-input';status.setAttribute('aria-label','Filtrar status');status.innerHTML='<option value="">Todos os status</option><option value="fresh">Atualizado</option><option value="stale">Dados salvos</option><option value="missing">Indisponível</option>';filters.querySelector('.admin-stats').append(status);status.addEventListener('change',()=>adminData&&renderAdmin(adminData));document.getElementById('filterStrategy').addEventListener('input',()=>adminData&&renderAdmin(adminData));
+ const status=document.createElement('select');status.id='filterStatus';status.className='login-input';status.setAttribute('aria-label','Filtrar status');status.innerHTML='<option value="">Todos os status</option><option value="fresh">Atualizado</option><option value="stale">Dados salvos</option><option value="missing">Indisponível</option>';filters.querySelector('.admin-stats').append(status);status.addEventListener('change',()=>adminData&&renderAdmin(adminData));document.getElementById('filterStrategy').addEventListener('change',()=>adminData&&renderAdmin(adminData));
+ const clear=document.createElement('button');clear.id='clearAdminFilters';clear.className='tab';clear.type='button';clear.textContent='Limpar filtros';clear.addEventListener('click',clearAdminFilters);filters.querySelector('.admin-stats').append(clear);
  const section=document.createElement('section');section.className='clients-section';section.id='clientsSection';clientRows.before(section);if(section.previousElementSibling?.classList.contains('sec-label'))section.previousElementSibling.remove();section.append(filters);section.insertAdjacentHTML('beforeend','<div class="client-columns"><span>Cliente</span><span>Estratégias</span><span>Saldo</span><span>Resultado</span><span>Últimos dados</span><span>Status</span><span>Ações</span></div>');section.append(clientRows);sync.after(section);
  const bottom=document.createElement('div');bottom.className='admin-bottom';section.after(bottom);bottom.append(health,document.getElementById('adminNotices'));
  const extra=document.querySelector('.additional-metrics');bottom.after(extra);
