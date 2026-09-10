@@ -19,6 +19,7 @@ import smtplib
 import threading
 import time
 import copy
+import logging
 from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -150,6 +151,9 @@ LOGIN_COOLDOWN_MINUTES = 15
 MYFXBOOK_REQUEST_INTERVAL_SECONDS = 1.5  # Precaucao local, nao limite oficial.
 _myfxbook_request_lock = asyncio.Lock()
 _myfxbook_last_request = 0.0
+_myfxbook_client = None
+_myfxbook_diagnostics = {"last_endpoint": "", "last_http_status": None, "last_error": "", "last_success_at": None, "requests": 0}
+_myfxbook_logger = logging.getLogger("copytrader.myfxbook")
 _login_state_loaded = False
 LOGIN_STATE_KEY = "myfxbook_login_state"
 LOGIN_STATE_FILE = DATA_DIR / "myfxbook_login_state.json"
@@ -835,6 +839,48 @@ def _check_myfxbook_pause() -> None:
         raise HTTPException(503, f"Consultas MyFXBook pausadas pelo monitor por mais {wait_s}s. Motivo: {_login_state['last_error']}")
 
 
+def _get_myfxbook_client():
+    global _myfxbook_client
+    if _myfxbook_client is None or _myfxbook_client.is_closed:
+        _myfxbook_client = httpx.AsyncClient(
+            timeout=15,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1, keepalive_expiry=300),
+        )
+    return _myfxbook_client
+
+
+@app.on_event("shutdown")
+async def close_myfxbook_client():
+    global _myfxbook_client
+    if _myfxbook_client is not None:
+        await _myfxbook_client.aclose()
+        _myfxbook_client = None
+
+
+def _record_myfxbook_error(reason: str):
+    # Only sanitized API messages and fixed error descriptions reach this logger.
+    _myfxbook_diagnostics["last_error"] = reason[:250]
+    _myfxbook_logger.warning("MyFXBook endpoint=%s http=%s reason=%s",
+                             _myfxbook_diagnostics["last_endpoint"],
+                             _myfxbook_diagnostics["last_http_status"], reason[:250])
+
+
+def myfxbook_diagnostics():
+    _load_login_state()
+    until = _login_state["failed_until"]
+    return {**_myfxbook_diagnostics,
+            "last_error": _myfxbook_diagnostics["last_error"] or _login_state["last_error"],
+            "retry_after_seconds": max(0, int((until-datetime.utcnow()).total_seconds())) if until else 0,
+            "session_present": bool(_session_cache["session"]),
+            "loaded_snapshots": sum(bool(v) for v in _account_snapshots.values())}
+
+
+@app.get("/admin/myfxbook-status")
+async def admin_myfxbook_status(authorization: Optional[str] = Header(None)):
+    require_admin_auth(authorization)
+    return myfxbook_diagnostics()
+
+
 async def _myfxbook_request(url: str, params: dict, cache_key: Optional[str] = None) -> dict:
     global _myfxbook_last_request
     async with _myfxbook_request_lock:
@@ -845,14 +891,19 @@ async def _myfxbook_request(url: str, params: dict, cache_key: Optional[str] = N
         delay = MYFXBOOK_REQUEST_INTERVAL_SECONDS - (time.monotonic() - _myfxbook_last_request)
         if delay > 0:
             await asyncio.sleep(delay)
+        _myfxbook_diagnostics.update(last_endpoint=url.rsplit("/", 1)[-1], last_http_status=None)
+        _myfxbook_diagnostics["requests"] += 1
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                r = await client.get(url, params=params)
+            r = await _get_myfxbook_client().get(url, params=params)
         except httpx.RequestError as exc:
-            raise HTTPException(502, f"Falha de comunicacao MyFXBook ({type(exc).__name__})") from None
+            reason = f"Falha de comunicacao MyFXBook ({type(exc).__name__})"
+            _record_myfxbook_error(reason)
+            raise HTTPException(502, reason) from None
         finally:
             _myfxbook_last_request = time.monotonic()
+        _myfxbook_diagnostics["last_http_status"] = r.status_code
         if r.status_code == 429:
+            _record_myfxbook_error("Limite de requisicoes (HTTP 429)")
             delay = LOGIN_COOLDOWN_MINUTES * 60
             retry = r.headers.get("Retry-After", "")
             try:
@@ -865,12 +916,14 @@ async def _myfxbook_request(url: str, params: dict, cache_key: Optional[str] = N
             _pause_myfxbook("Limite de requisicoes informado pela API (HTTP 429)", delay)
             raise HTTPException(503, "MyFXBook limitou as requisicoes. Consultas pausadas.")
         if r.status_code != 200:
+            _record_myfxbook_error(f"HTTP {r.status_code}")
             raise HTTPException(502, f"MyFXBook HTTP {r.status_code}")
         try:
             data = r.json()
             if not isinstance(data, dict):
                 raise ValueError()
         except ValueError:
+            _record_myfxbook_error("Resposta em formato invalido")
             raise HTTPException(502, "Resposta MyFXBook em formato invalido") from None
         msg = str(data.get("message") or "")
         rate_limited = any(term in msg.lower() for term in ("too many request", "rate limit"))
@@ -878,6 +931,10 @@ async def _myfxbook_request(url: str, params: dict, cache_key: Optional[str] = N
             if secret:
                 msg = msg.replace(str(secret), "[oculto]")
         data["message"] = msg[:250]
+        if data.get("error"):
+            _record_myfxbook_error(data["message"] or "Erro sem mensagem")
+        else:
+            _myfxbook_diagnostics.update(last_error="", last_success_at=datetime.utcnow().isoformat()+"Z")
         if data.get("error") and rate_limited:
             _pause_myfxbook("Limite de requisicoes informado pela API")
             raise HTTPException(503, "MyFXBook limitou as requisicoes. Consultas pausadas.")
@@ -951,6 +1008,8 @@ async def cached_get(url: str, params: dict, _retry_session: bool = True) -> dic
             return await cached_get(url, {**params, "session": fresh}, _retry_session=False)
         if session_expired:
             _drop_session(expected_session=params["session"])
+            _pause_myfxbook("Sessao rejeitada apos renovacao. Verifique a vinculacao da sessao ao IP de saida.")
+            raise HTTPException(503, "MyFXBook rejeitou a sessao renovada; novas tentativas pausadas.")
         raise HTTPException(502, f"MyFXBook API error: {msg} ({url})")
     return data
 
@@ -1180,6 +1239,7 @@ async def admin_summary(authorization: Optional[str] = Header(None)):
         "audit_logs": read_audit_logs(200),
         "global_notices": read_notice_store().get("global", [])[:10],
         "health": health_from_clients(clients),
+        "myfxbook": myfxbook_diagnostics(),
     }
 
 

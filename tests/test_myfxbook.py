@@ -36,6 +36,8 @@ class MyfxbookTests(unittest.IsolatedAsyncioTestCase):
             "_login_lock": asyncio.Lock(),
             "_myfxbook_request_lock": asyncio.Lock(),
             "_myfxbook_last_request": 0.0,
+            "_myfxbook_client": None,
+            "_myfxbook_diagnostics": {"last_endpoint":"", "last_http_status":None, "last_error":"", "last_success_at":None,"requests":0},
         }
         for key, value in patches.items():
             p = patch.object(m, key, value); p.start(); self.addCleanup(p.stop)
@@ -47,6 +49,9 @@ class MyfxbookTests(unittest.IsolatedAsyncioTestCase):
             patch.object(m.asyncio, "sleep", side_effect=sleep),
         ):
             p.start(); self.addCleanup(p.stop)
+
+    async def asyncTearDown(self):
+        await m.close_myfxbook_client()
 
     def transport(self, handler):
         def record(request):
@@ -158,6 +163,35 @@ class MyfxbookTests(unittest.IsolatedAsyncioTestCase):
             first=m.read_client_config()
             second=m.read_client_config()
         self.assertEqual(first,second)
+
+    async def test_requests_reuse_same_http_client(self):
+        self.transport(lambda r: httpx.Response(200,json={"error":False}))
+        await m.cached_get("https://test.invalid/one",{})
+        first=m._myfxbook_client
+        await m.cached_get("https://test.invalid/two",{})
+        self.assertIs(m._myfxbook_client,first)
+        self.assertFalse(first.is_closed)
+
+    async def test_rejected_renewed_session_pauses_further_login(self):
+        m._session_cache.update(session="old-token",expires=datetime.utcnow()+timedelta(days=1))
+        def handler(r):
+            if r.url.path.endswith("login.json"):
+                return httpx.Response(200,json={"error":False,"session":"new-token"})
+            return httpx.Response(200,json={"error":True,"message":"Invalid session"})
+        self.transport(handler)
+        with self.assertRaises(m.HTTPException):
+            await m.cached_get("https://test.invalid/accounts",{"session":"old-token"})
+        with self.assertRaises(m.HTTPException): await m.get_myfxbook_session()
+        self.assertEqual(sum(r.url.path.endswith("login.json") for r in self.calls),1)
+        self.assertGreater(m._login_state["failed_until"],datetime.utcnow())
+
+    async def test_diagnostics_require_admin_and_never_call_upstream(self):
+        with self.assertRaises(m.HTTPException): await m.admin_myfxbook_status(None)
+        with patch.object(m,"require_admin_auth"),patch.object(m,"_get_myfxbook_client",side_effect=AssertionError("network forbidden")):
+            data=await m.admin_myfxbook_status("Bearer admin")
+        self.assertNotIn("session",data)
+        self.assertNotIn("password",data)
+        self.assertEqual(data["requests"],0)
 
     async def test_transport_errors_do_not_expose_credentials(self):
         def fail(request):
