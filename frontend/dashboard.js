@@ -24,4 +24,3 @@ setupDashboard();
 function highlightAdminSection(){const target=location.hash||'#adminOverview';document.querySelectorAll('.admin-sidebar a').forEach(a=>{if(a.getAttribute('href')===target)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}
 window.addEventListener('hashchange',highlightAdminSection);
 highlightAdminSection();
-load();
