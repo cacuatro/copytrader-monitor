@@ -28,3 +28,6 @@ build/
 
 # Archives
 *.zip
+
+# Local runtime state (JSON fallback store, cached MyFXBook session)
+data/
