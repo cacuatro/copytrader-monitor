@@ -12,3 +12,13 @@
 @media(max-width:760px){.reference-layout #chartPeriods{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}.reference-layout #chartPeriods .tab{min-width:0;padding:9px 8px}}
 
 .all-strategies-link{color:var(--green);font-size:13px;text-decoration:none;line-height:1.5;padding:8px 0}.all-strategies-link:hover,.all-strategies-link:focus-visible{text-decoration:underline;text-underline-offset:4px}
+
+.brand-lockup{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.brand-emblem{width:56px;height:56px;object-fit:contain;border-radius:50%;border:1px solid #26c49a55;box-shadow:0 0 20px #14d6aa12;background:#041019}
+.reference-layout header{height:84px}
+.reference-layout .brand-lockup .wordmark{font-size:25px;letter-spacing:-1px}
+.reference-layout .admin-sidebar>.brand-lockup{padding:0 16px;gap:10px;margin-bottom:10px}
+.reference-layout .admin-sidebar .brand-emblem{width:54px;height:54px}
+.reference-layout .admin-sidebar .brand-lockup .wordmark{padding:0;font-size:21px}
+.reference-layout .admin-sidebar small{margin-left:20px;font-size:8px;letter-spacing:2.6px}
+@media(max-width:760px){.reference-layout header{height:auto}.reference-layout .brand-emblem{width:44px;height:44px}.reference-layout .brand-lockup{gap:9px}.reference-layout .brand-lockup .wordmark{font-size:22px}.reference-layout .admin-sidebar>.brand-lockup{display:none}.reference-layout #admin header .brand-lockup .wordmark{font-size:20px}}
