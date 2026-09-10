@@ -19,3 +19,8 @@ main{max-width:1360px;padding:36px 32px 64px}.client-name{font-size:34px;letter-
 
 .additional-metrics{margin:-4px 0 24px}.additional-metrics>summary{color:var(--muted);cursor:pointer;padding:12px 0;font-size:12px}.extra-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px}.extra-metrics .sm-v{font-size:19px}#admin .summary .sm-l{line-height:1.5}.login-error{white-space:normal}
 @media(max-width:700px){.extra-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}#app .summary .sm-v{font-size:20px}.support-metrics .sm-v{font-size:22px}}
+
+/* Reset legacy card spans in the secondary metrics grid. */
+#admin .extra-metrics>.sm{grid-column:auto;min-width:0}
+#adminCoverage{margin-top:-8px}
+.admin-sidebar a[aria-current="page"]{color:var(--green);background:#26c49a10}
