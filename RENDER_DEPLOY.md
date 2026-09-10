@@ -76,3 +76,21 @@ Validacao local sem chamadas reais ou alteracao de credenciais:
 ```powershell
 backend/venv/Scripts/python.exe -B -W ignore::DeprecationWarning -m unittest discover -s tests -v
 ```
+
+## Ultimos dados validos e acesso dos clientes
+
+Cada conta salva a ultima resposta financeira valida no banco, com chave que
+inclui o identificador MyFXBook, e usa JSON local quando nao ha banco. Falhas nao
+sobrescrevem essa resposta. O painel apresenta os valores salvos, o horario da
+consulta e um aviso. Contas nunca sincronizadas mostram indisponibilidade; nao
+ha como reconstruir dados anteriores que nunca foram persistidos. Para manter
+as copias entre redeploys no Render, DATABASE_URL deve estar configurada.
+
+O resumo administrativo pode ser aproveitado pelo cliente quando as consultas
+extras de historico falham. Historico indisponivel e diferente de historico sem
+operacoes. Totais com contas sem nenhuma copia valida ficam indisponiveis.
+
+O login do cliente independe do MyFXBook. Apos entrar pela raiz, a pagina passa
+para a URL do cliente autenticado, preservando a sessao ao recarregar. Erros de
+servidor nao sao apresentados como senha incorreta. A duracao normal do token
+continua controlada por TOKEN_TTL_HOURS. Nao ha redefinicao de senhas existente.

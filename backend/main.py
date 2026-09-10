@@ -18,6 +18,7 @@ from typing import Optional
 import smtplib
 import threading
 import time
+import copy
 from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -138,6 +139,10 @@ CLIENTS_MAP = {
 
 _session_cache = {"session": None, "expires": None}
 _data_cache = {}
+_account_snapshots = {}
+_account_locks = {}
+_account_retry_after = {}
+_client_config_last_good = None
 _login_lock = asyncio.Lock()
 _login_state = {"failed_until": None, "last_error": ""}
 CACHE_TTL_MINUTES = 15
@@ -235,7 +240,7 @@ def ensure_db() -> None:
             raise
 
 
-def db_read_state(key: str, default):
+def db_read_state(key: str, default, strict: bool = False):
     try:
         ensure_db()
         with db_connect() as conn:
@@ -245,6 +250,8 @@ def db_read_state(key: str, default):
     except Exception as e:
         global _db_error
         _db_error = str(e)
+        if strict:
+            raise HTTPException(503, "Banco de dados temporariamente indisponivel") from None
         return default
     if not row:
         return default
@@ -311,16 +318,32 @@ def write_json_file(path: Path, data) -> None:
 
 
 def read_client_config() -> dict:
+    global _client_config_last_good
     if db_enabled():
-        return db_read_state("client_config", {})
+        try:
+            config = db_read_state("client_config", {}, strict=True)
+            _client_config_last_good = copy.deepcopy(config)
+            try:
+                write_json_file(CLIENT_CONFIG_FILE, config)
+            except OSError:
+                pass
+            return config
+        except HTTPException:
+            if _client_config_last_good is not None:
+                return copy.deepcopy(_client_config_last_good)
+            if CLIENT_CONFIG_FILE.exists():
+                return read_json_file(CLIENT_CONFIG_FILE, {})
+            raise
     return read_json_file(CLIENT_CONFIG_FILE, {})
 
 
 def write_client_config(config: dict) -> None:
+    global _client_config_last_good
     if db_enabled():
         db_write_state("client_config", config)
-        return
-    write_json_file(CLIENT_CONFIG_FILE, config)
+    else:
+        write_json_file(CLIENT_CONFIG_FILE, config)
+    _client_config_last_good = copy.deepcopy(config)
 
 
 def clients_map() -> dict:
@@ -343,6 +366,9 @@ def get_client_info(slug: str) -> dict:
 def update_client_config(slug: str, updates: dict) -> dict:
     if slug not in CLIENTS_MAP:
         raise HTTPException(404, "Cliente nao encontrado")
+    proposed = updates.get("username")
+    if proposed and any(other != slug and str(info.get("username", "")).strip().casefold() == proposed.strip().casefold() for other, info in clients_map().items()):
+        raise HTTPException(409, "Este usuario ja esta em uso por outro cliente")
     config = read_client_config()
     current = config.get(slug, {}) if isinstance(config.get(slug, {}), dict) else {}
     current.update({k: v for k, v in updates.items() if v is not None})
@@ -624,24 +650,29 @@ def parse_myfxbook_update(value: Optional[str]) -> Optional[datetime]:
 
 
 def health_from_clients(clients: list) -> dict:
-    accounts = []
-    stale = []
-    now = local_now()
+    issues = []
+    total = healthy = unavailable = 0
     for client in clients:
-        data = client.get("data") or {}
         if client.get("error"):
-            stale.append({"client": client.get("name"), "reason": "Dados indisponiveis: falha de consulta ao MyFXBook"})
+            issues.append({"client": client.get("name"), "reason": "Cliente indisponivel"})
             continue
-        for acc in data.get("accounts", []):
-            if acc.get("error"):
-                stale.append({"client": client.get("name"), "strategy": acc.get("name"), "reason": "erro"})
-                continue
+        for acc in (client.get("data") or {}).get("accounts", []):
+            total += 1
             updated = parse_myfxbook_update(acc.get("myfxbook_updated_at") or acc.get("lastUpdateDate"))
-            item = {"client": client.get("name"), "strategy": acc.get("name"), "updated_at": acc.get("myfxbook_updated_at") or acc.get("lastUpdateDate")}
-            accounts.append(item)
-            if not updated or (now - updated) > timedelta(hours=12):
-                stale.append(item)
-    return {"accounts": len(accounts), "stale": len(stale), "ok": max(0, len(accounts) - len(stale)), "stale_accounts": stale[:20]}
+            reason = ""
+            if acc.get("error"):
+                unavailable += 1
+                reason = "Sem consulta valida salva"
+            elif acc.get("stale"):
+                reason = "Dados salvos: " + str(acc.get("fetched_at", "sem data"))
+            elif not updated or local_now() - updated > timedelta(hours=12):
+                reason = "Fonte desatualizada ou sem horario informado"
+            else:
+                healthy += 1
+            if reason:
+                issues.append({"client": client.get("name"), "strategy": acc.get("name"), "reason": reason,
+                               "updated_at": acc.get("myfxbook_updated_at")})
+    return {"accounts": total, "ok": healthy, "stale": len(issues), "unavailable": unavailable, "stale_accounts": issues}
 
 
 def month_ranges_from_year_start():
@@ -930,6 +961,10 @@ def clear_myfxbook_cache(drop_session: bool = False) -> int:
         if "myfxbook.com" in key:
             _data_cache.pop(key, None)
             removed += 1
+    _account_retry_after.clear()
+    for saved in _account_snapshots.values():
+        if saved:
+            saved["stale"] = True
     # Limpar dados nao exige novo login nem remove a pausa apos falha.
     if drop_session:
         _drop_session()
@@ -998,7 +1033,7 @@ async def login(credentials: dict, request: Request):
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         return {"token": make_token("admin", "admin"), "role": "admin", "name": "Administrador", "expires_in_hours": TOKEN_TTL_HOURS}
     all_clients = clients_map()
-    client_slug = next((slug for slug, info in all_clients.items() if info.get("username") == username and info.get("password") == password), None)
+    client_slug = next((slug for slug, info in all_clients.items() if str(info.get("username", "")).strip().casefold() == username.casefold() and info.get("password") == password), None)
     if not client_slug:
         write_access_log("login", requested_slug or "desconhecido", request, success=False, username=username)
         raise HTTPException(401, "Usuario ou senha invalidos")
@@ -1018,8 +1053,6 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
         except Exception as e:
             results.append({"slug": acc_slug, "name": ACCOUNTS_MAP.get(acc_slug, {}).get("name", acc_slug), "error": str(e)})
     ok = [a for a in results if not a.get("error")]
-    if len(ok) != len(results):
-        raise HTTPException(502, "Dados indisponiveis: falha ao consultar uma ou mais contas no MyFXBook. Os totais nao foram calculados.")
     total_balance = sum(float(a.get("balance") or 0) for a in ok)
     total_profit_day = sum(float(a.get("profit_day") or 0) for a in ok)
     total_profit_week = sum(float(a.get("profit_week") or 0) for a in ok)
@@ -1047,7 +1080,7 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
     brl_rate = usd_brl["rate"]
     manual_withdrawals = round(float(client_info.get("manual_withdrawals") or 0), 2)
     manual_commission = round(float(client_info.get("manual_commission") or 0), 2)
-    return {
+    result = {
         "slug": slug,
         "name": client_info["name"],
         "username": client_info.get("username", ""),
@@ -1097,6 +1130,21 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
         "commission_total": commission_total,
         "commission_total_brl": round(commission_total * brl_rate, 2),
     }
+    for field, manual in (("withdrawals", manual_withdrawals), ("paid_commission", manual_commission)):
+        value = round(sum(a[field] for a in ok) + manual, 2) if ok and all(a.get(field) is not None for a in ok) else None
+        result["total_" + field] = value
+        result["total_" + field + "_brl"] = round(value * brl_rate, 2) if value is not None else None
+    missing = len(ok) != len(results) or not results
+    saved_accounts = [a for a in ok if a.get("stale")]
+    result.update(data_unavailable=missing, stale=bool(saved_accounts),
+                  last_success_at=min((a.get("fetched_at", "") for a in ok), default=""),
+                  sync_warning=("Algumas contas ainda nao possuem dados salvos; totais indisponiveis." if missing else
+                                "Exibindo ultimos dados salvos. A atualizacao esta temporariamente indisponivel." if saved_accounts else ""))
+    if missing:
+        for key in result:
+            if key.startswith("total_") or (key.startswith("commission_") and key != "commission_rate"):
+                result[key] = None
+    return result
 
 
 @app.get("/cliente/{slug}")
@@ -1252,7 +1300,72 @@ async def get_account(slug: str, authorization: Optional[str] = Header(None)):
     return await get_account_data(slug)
 
 
+def _snapshot_location(slug: str):
+    identity = f"{slug}_{ACCOUNTS_MAP[slug]['id']}"
+    key = "account_snapshot_" + identity
+    path = DATA_DIR / (key + ".json")
+    STATE_FALLBACK_FILES[key] = path
+    return key, path
+
+
+def _read_account_snapshot(slug: str) -> dict:
+    key, path = _snapshot_location(slug)
+    if key not in _account_snapshots:
+        stored = db_read_state(key, {}) if db_enabled() else {}
+        _account_snapshots[key] = stored or read_json_file(path, {})
+    return copy.deepcopy(_account_snapshots[key])
+
+
+def _write_account_snapshot(slug: str, data: dict) -> None:
+    key, path = _snapshot_location(slug)
+    _account_snapshots[key] = copy.deepcopy(data)
+    try:
+        if db_enabled():
+            db_write_state(key, data)
+        else:
+            write_json_file(path, data)
+    except Exception:
+        pass
+
+
 async def get_account_data(slug: str, lite: bool = False):
+    if slug not in ACCOUNTS_MAP:
+        raise HTTPException(404, "Conta nao encontrada")
+    lock = _account_locks.setdefault(slug, asyncio.Lock())
+    async with lock:
+        saved = _read_account_snapshot(slug)
+        now = datetime.utcnow()
+        try:
+            recent = now - datetime.fromisoformat(saved["fetched_at"].removesuffix("Z")) < timedelta(minutes=CACHE_TTL_MINUTES)
+        except (KeyError, ValueError, TypeError):
+            recent = False
+        if recent and (lite or saved.get("details_complete") or saved.get("details_warning")) and not saved.get("stale"):
+            return saved
+        if saved and _account_retry_after.get(slug, datetime.min) > now:
+            return {**saved, "stale": True, "sync_warning": "Exibindo a ultima consulta valida; nova tentativa aguardando."}
+        try:
+            fresh = await _fetch_account_data(slug, lite=lite)
+            if not isinstance(fresh, dict) or fresh.get("balance") is None:
+                raise HTTPException(502, "Resposta financeira incompleta")
+        except Exception:
+            _account_retry_after[slug] = now + timedelta(minutes=LOGIN_COOLDOWN_MINUTES)
+            if saved:
+                return {**saved, "stale": True, "sync_warning": "Falha na atualizacao. Valores preservados da ultima consulta valida."}
+            raise
+        fresh.update(fetched_at=datetime.utcnow().isoformat() + "Z", stale=False,
+                     details_complete=fresh.get("details_complete", not lite), sync_warning="")
+        if not fresh["details_complete"] and saved.get("history"):
+            for field in ("history", "open_trades", "open_trades_count", "open_trades_profit", "open_trades_profit_brl"):
+                fresh[field] = saved.get(field)
+            fresh["details_fetched_at"] = saved.get("details_fetched_at", saved.get("fetched_at"))
+        elif fresh["details_complete"]:
+            fresh["details_fetched_at"] = fresh["fetched_at"]
+        _write_account_snapshot(slug, fresh)
+        _account_retry_after.pop(slug, None)
+        return fresh
+
+
+async def _fetch_account_data(slug: str, lite: bool = False):
     if slug not in ACCOUNTS_MAP:
         raise HTTPException(404, "Conta nao encontrada")
     account_info = ACCOUNTS_MAP[slug]
@@ -1264,14 +1377,18 @@ async def get_account_data(slug: str, lite: bool = False):
             today_local = local_now().date()
             accounts_task = cached_get("https://www.myfxbook.com/api/get-my-accounts.json", {"session": session})
             daily_gain_task = cached_get("https://www.myfxbook.com/api/get-daily-gain.json", {"session": session, "id": account_id, "start": datetime(today_local.year, 1, 1).strftime("%Y-%m-%d"), "end": today_local.strftime("%Y-%m-%d")})
-            if lite:
-                accounts_data, daily_gain_data = await asyncio.gather(accounts_task, daily_gain_task)
-                open_trades_data = {"openTrades": []}
-                history_data = {"history": []}
-            else:
-                open_trades_task = cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id})
-                history_task = cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id})
-                accounts_data, open_trades_data, history_data, daily_gain_data = await asyncio.gather(accounts_task, open_trades_task, history_task, daily_gain_task)
+            accounts_data, daily_gain_data = await asyncio.gather(accounts_task, daily_gain_task)
+            details_ok = False
+            open_trades_data, history_data = {"openTrades": []}, {"history": []}
+            if not lite:
+                optional = await asyncio.gather(
+                    cached_get("https://www.myfxbook.com/api/get-open-trades.json", {"session": session, "id": account_id}),
+                    cached_get("https://www.myfxbook.com/api/get-history.json", {"session": session, "id": account_id}),
+                    return_exceptions=True,
+                )
+                details_ok = all(isinstance(item, dict) for item in optional)
+                if details_ok:
+                    open_trades_data, history_data = optional
             account_detail = next((a for a in accounts_data.get("accounts", []) if a["id"] == account_id), None)
             if not account_detail:
                 raise HTTPException(404, "Conta nao encontrada no MyFXBook")
@@ -1371,6 +1488,10 @@ async def get_account_data(slug: str, lite: bool = False):
                 for trade in history_data.get("history", [])[:30]
             ]
             return {
+                "withdrawals": withdrawals,
+                "paid_commission": commission,
+                "details_complete": details_ok,
+                "details_warning": "" if lite or details_ok else "Historico indisponivel; resumo financeiro preservado.",
                 "slug": slug,
                 "name": account_info["name"],
                 "description": account_info["description"],

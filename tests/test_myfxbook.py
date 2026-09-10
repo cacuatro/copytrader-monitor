@@ -29,6 +29,10 @@ class MyfxbookTests(unittest.IsolatedAsyncioTestCase):
             "_login_state": {"failed_until": None, "last_error": ""},
             "_login_state_loaded": False,
             "_data_cache": {},
+            "_account_snapshots": {},
+            "_account_locks": {},
+            "_account_retry_after": {},
+            "_client_config_last_good": None,
             "_login_lock": asyncio.Lock(),
             "_myfxbook_request_lock": asyncio.Lock(),
             "_myfxbook_last_request": 0.0,
@@ -101,8 +105,59 @@ class MyfxbookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state, {})
 
     async def test_failed_accounts_do_not_become_zero_totals(self):
-        with patch.object(m, "get_client_info", return_value={"accounts": ["test"]}), patch.object(m, "get_account_data", AsyncMock(side_effect=m.HTTPException(502, "failed"))):
-            with self.assertRaises(m.HTTPException): await m.build_client_data("test")
+        with patch.object(m, "get_client_info", return_value={"name":"Test", "accounts": ["test"]}), patch.object(m, "get_account_data", AsyncMock(side_effect=m.HTTPException(502, "failed"))), patch.object(m, "get_usd_brl_rate", AsyncMock(return_value={"rate":5,"source":"test"})), patch.object(m,"client_notice",return_value=""), patch.object(m,"notice_history",return_value=[]):
+            data = await m.build_client_data("test")
+            self.assertTrue(data["data_unavailable"])
+            self.assertIsNone(data["total_balance"])
+            self.assertEqual(data["name"],"Test")
+
+    async def test_snapshot_survives_restart_and_api_failure(self):
+        slug = next(iter(m.ACCOUNTS_MAP))
+        with patch.object(m,"_fetch_account_data",AsyncMock(return_value={"balance":123.45,"history":[],"profit_day":4})):
+            first = await m.get_account_data(slug)
+        key,_ = m._snapshot_location(slug)
+        self.state[str(m._snapshot_location(slug)[1])]["fetched_at"] = (datetime.utcnow()-timedelta(hours=1)).isoformat()+"Z"
+        m._account_snapshots.clear()
+        with patch.object(m,"_fetch_account_data",AsyncMock(side_effect=m.HTTPException(502,"failed"))) as fetch:
+            saved = await m.get_account_data(slug)
+            again = await m.get_account_data(slug)
+            self.assertEqual(fetch.await_count,1)
+        self.assertEqual(saved["balance"],123.45)
+        self.assertTrue(saved["stale"])
+        self.assertEqual(saved["fetched_at"],again["fetched_at"])
+        self.assertFalse(self.state[str(m._snapshot_location(slug)[1])]["stale"])
+
+    async def test_admin_snapshot_available_to_client_when_details_fail(self):
+        slug = next(iter(m.ACCOUNTS_MAP))
+        with patch.object(m,"_fetch_account_data",AsyncMock(return_value={"balance":200,"history":[]})):
+            await m.get_account_data(slug,lite=True)
+        with patch.object(m,"_fetch_account_data",AsyncMock(side_effect=m.HTTPException(502,"history failed"))):
+            data=await m.get_account_data(slug,lite=False)
+        self.assertEqual(data["balance"],200)
+        self.assertTrue(data["stale"])
+
+    async def test_client_auth_is_independent_of_myfxbook(self):
+        req=m.Request({"type":"http","headers":[],"client":("127.0.0.1",1)})
+        with patch.object(m,"clients_map",return_value={"ana":{"username":"Ana","password":"Exact Password","name":"Ana"}}), patch.object(m,"write_access_log"), patch.object(m,"get_myfxbook_session",AsyncMock(side_effect=AssertionError("must not call API"))):
+            data=await m.login({"username":" ANA ","password":"Exact Password"},req)
+            self.assertEqual(data["client_slug"],"ana")
+            with self.assertRaises(m.HTTPException): await m.login({"username":"ana","password":"wrong"},req)
+            with self.assertRaises(m.HTTPException): m.require_client_auth("other", "Bearer "+data["token"])
+
+    async def test_incomplete_response_keeps_previous_balance(self):
+        slug=next(iter(m.ACCOUNTS_MAP))
+        m._write_account_snapshot(slug,{"balance":321,"details_complete":True,"fetched_at":(datetime.utcnow()-timedelta(hours=1)).isoformat()+"Z"})
+        with patch.object(m,"_fetch_account_data",AsyncMock(return_value={"balance":None})):
+            result=await m.get_account_data(slug)
+        self.assertEqual(result["balance"],321)
+        self.assertTrue(result["stale"])
+
+    def test_database_outage_preserves_last_known_credentials(self):
+        saved={"ana":{"username":"ana","password":"saved-password"}}
+        with patch.object(m,"db_enabled",return_value=True),patch.object(m,"db_read_state",side_effect=[saved,m.HTTPException(503,"db down")]):
+            first=m.read_client_config()
+            second=m.read_client_config()
+        self.assertEqual(first,second)
 
     async def test_transport_errors_do_not_expose_credentials(self):
         def fail(request):
