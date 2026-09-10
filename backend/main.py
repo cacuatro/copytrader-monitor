@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 import smtplib
 import threading
+import time
+from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 try:
@@ -140,6 +142,12 @@ _login_lock = asyncio.Lock()
 _login_state = {"failed_until": None, "last_error": ""}
 CACHE_TTL_MINUTES = 15
 LOGIN_COOLDOWN_MINUTES = 15
+MYFXBOOK_REQUEST_INTERVAL_SECONDS = 1.5  # Precaucao local, nao limite oficial.
+_myfxbook_request_lock = asyncio.Lock()
+_myfxbook_last_request = 0.0
+_login_state_loaded = False
+LOGIN_STATE_KEY = "myfxbook_login_state"
+LOGIN_STATE_FILE = DATA_DIR / "myfxbook_login_state.json"
 SESSION_STATE_KEY = "myfxbook_session"
 SESSION_FILE = DATA_DIR / "myfxbook_session.json"
 _access_log_lock = threading.Lock()
@@ -245,6 +253,8 @@ def db_read_state(key: str, default):
 
 
 STATE_FALLBACK_FILES = {
+    SESSION_STATE_KEY: SESSION_FILE,
+    LOGIN_STATE_KEY: LOGIN_STATE_FILE,
     "client_config": CLIENT_CONFIG_FILE,
     "notice_store": NOTICE_FILE,
     "strategy_adjustments": STRATEGY_ADJUSTMENTS_FILE,
@@ -619,6 +629,9 @@ def health_from_clients(clients: list) -> dict:
     now = local_now()
     for client in clients:
         data = client.get("data") or {}
+        if client.get("error"):
+            stale.append({"client": client.get("name"), "reason": "Dados indisponiveis: falha de consulta ao MyFXBook"})
+            continue
         for acc in data.get("accounts", []):
             if acc.get("error"):
                 stale.append({"client": client.get("name"), "strategy": acc.get("name"), "reason": "erro"})
@@ -732,7 +745,10 @@ def _persist_session(session: str, expires: datetime) -> None:
         pass
 
 
-def _drop_session() -> None:
+def _drop_session(expected_session: Optional[str] = None) -> None:
+    # Uma resposta antiga nao pode invalidar uma sessao ja renovada.
+    if expected_session is not None and _session_cache["session"] != expected_session:
+        return
     _session_cache["session"] = None
     _session_cache["expires"] = None
     try:
@@ -744,47 +760,131 @@ def _drop_session() -> None:
         pass
 
 
-async def _myfxbook_login() -> str:
-    """Login unico no MyFXBook. A API limita a taxa de chamadas a login.json e,
-    quando esta limitando, responde 'Wrong email/password.' (identico a senha
-    errada de verdade). Por isso NAO reintentamos em rajada: uma falha ativa um
-    periodo de espera (_login_state['failed_until']) durante o qual nenhuma nova
-    tentativa de login e feita, deixando a punicao do MyFXBook expirar."""
-    now = datetime.utcnow()
-    if _login_state["failed_until"] and now < _login_state["failed_until"]:
-        wait_s = int((_login_state["failed_until"] - now).total_seconds())
-        raise HTTPException(502, (
-            f"MyFXBook recusou o login (\"{_login_state['last_error']}\"). "
-            f"Aguardando {wait_s}s antes de tentar de novo - a API limita "
-            f"chamadas seguidas ao login."
-        ))
+def _load_login_state() -> None:
+    global _login_state_loaded
+    if _login_state_loaded:
+        return
+    _login_state_loaded = True
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                "https://www.myfxbook.com/api/login.json",
-                params={"email": MYFXBOOK_EMAIL, "password": MYFXBOOK_PASSWORD},
-            )
-        data = r.json()
-    except Exception as e:
+        stored = db_read_state(LOGIN_STATE_KEY, {}) if db_enabled() else {}
+        if not stored:
+            stored = read_json_file(LOGIN_STATE_FILE, {})
+        until = datetime.fromisoformat(stored["failed_until"])
+        if until > datetime.utcnow():
+            _login_state.update(failed_until=until, last_error=str(stored.get("last_error", "Falha anterior")))
+    except (KeyError, ValueError, TypeError, OSError):
+        pass
+
+
+def _save_login_state() -> None:
+    until = _login_state["failed_until"]
+    payload = {"failed_until": until.isoformat() if until else None,
+               "last_error": _login_state["last_error"]}
+    try:
+        if db_enabled():
+            db_write_state(LOGIN_STATE_KEY, payload)
+        else:
+            write_json_file(LOGIN_STATE_FILE, payload)
+    except Exception:
+        pass
+
+
+def _pause_myfxbook(reason: str, seconds: float = LOGIN_COOLDOWN_MINUTES * 60) -> None:
+    until = datetime.utcnow() + timedelta(seconds=seconds)
+    if not _login_state["failed_until"] or until > _login_state["failed_until"]:
+        _login_state.update(failed_until=until, last_error=reason)
+        _save_login_state()
+
+
+def _check_myfxbook_pause() -> None:
+    _load_login_state()
+    until = _login_state["failed_until"]
+    if until and until > datetime.utcnow():
+        wait_s = max(1, int((until - datetime.utcnow()).total_seconds()))
+        raise HTTPException(503, f"Consultas MyFXBook pausadas pelo monitor por mais {wait_s}s. Motivo: {_login_state['last_error']}")
+
+
+async def _myfxbook_request(url: str, params: dict, cache_key: Optional[str] = None) -> dict:
+    global _myfxbook_last_request
+    async with _myfxbook_request_lock:
+        # Pedidos iguais que aguardaram na fila aproveitam a primeira resposta.
+        if cache_key in _data_cache and _data_cache[cache_key]["expires"] > datetime.utcnow():
+            return _data_cache[cache_key]["data"]
+        _check_myfxbook_pause()
+        delay = MYFXBOOK_REQUEST_INTERVAL_SECONDS - (time.monotonic() - _myfxbook_last_request)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(url, params=params)
+        except httpx.RequestError as exc:
+            raise HTTPException(502, f"Falha de comunicacao MyFXBook ({type(exc).__name__})") from None
+        finally:
+            _myfxbook_last_request = time.monotonic()
+        if r.status_code == 429:
+            delay = LOGIN_COOLDOWN_MINUTES * 60
+            retry = r.headers.get("Retry-After", "")
+            try:
+                delay = max(delay, float(retry))
+            except ValueError:
+                try:
+                    delay = max(delay, parsedate_to_datetime(retry).timestamp() - time.time())
+                except (ValueError, TypeError, OverflowError):
+                    pass
+            _pause_myfxbook("Limite de requisicoes informado pela API (HTTP 429)", delay)
+            raise HTTPException(503, "MyFXBook limitou as requisicoes. Consultas pausadas.")
+        if r.status_code != 200:
+            raise HTTPException(502, f"MyFXBook HTTP {r.status_code}")
+        try:
+            data = r.json()
+            if not isinstance(data, dict):
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(502, "Resposta MyFXBook em formato invalido") from None
+        msg = str(data.get("message") or "")
+        rate_limited = any(term in msg.lower() for term in ("too many request", "rate limit"))
+        for secret in (MYFXBOOK_EMAIL, MYFXBOOK_PASSWORD, params.get("session")):
+            if secret:
+                msg = msg.replace(str(secret), "[oculto]")
+        data["message"] = msg[:250]
+        if data.get("error") and rate_limited:
+            _pause_myfxbook("Limite de requisicoes informado pela API")
+            raise HTTPException(503, "MyFXBook limitou as requisicoes. Consultas pausadas.")
+        if cache_key and not data.get("error"):
+            _data_cache[cache_key] = {"data": data, "expires": datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)}
+        return data
+
+
+async def _myfxbook_login() -> str:
+    """Autentica uma vez; o intervalo local evita repetir falhas em sequencia."""
+    _check_myfxbook_pause()
+    if not MYFXBOOK_EMAIL or not MYFXBOOK_PASSWORD:
+        raise HTTPException(503, "Credenciais MyFXBook nao configuradas no servidor.")
+    try:
+        data = await _myfxbook_request(
+            "https://www.myfxbook.com/api/login.json",
+            {"email": MYFXBOOK_EMAIL, "password": MYFXBOOK_PASSWORD},
+        )
+    except HTTPException as exc:
         data = None
-        err = f"HTTP/JSON ({e})"
+        err = str(exc.detail)
     else:
-        err = data.get("message") or "erro desconhecido" if data.get("error") else ""
+        err = data.get("message") or "Resposta sem sessao valida"
 
     if data is not None and not data.get("error") and data.get("session"):
-        expires = datetime.utcnow() + timedelta(hours=12)
+        expires = datetime.utcnow() + timedelta(days=29)
         _session_cache["session"] = data["session"]
         _session_cache["expires"] = expires
         _login_state["failed_until"] = None
         _login_state["last_error"] = ""
+        _save_login_state()
         _persist_session(data["session"], expires)
         return data["session"]
 
-    _login_state["failed_until"] = datetime.utcnow() + timedelta(minutes=LOGIN_COOLDOWN_MINUTES)
-    _login_state["last_error"] = err
+    _pause_myfxbook(err)
     raise HTTPException(502, (
         f"MyFXBook login falhou: {err}. Nova tentativa em "
-        f"{LOGIN_COOLDOWN_MINUTES} min (a API bloqueia logins repetidos)."
+        f"{LOGIN_COOLDOWN_MINUTES} min por precaucao do monitor."
     ))
 
 
@@ -808,27 +908,19 @@ async def cached_get(url: str, params: dict, _retry_session: bool = True) -> dic
     now = datetime.utcnow()
     if key in _data_cache and _data_cache[key]["expires"] > now:
         return _data_cache[key]["data"]
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, params=params)
-    if r.status_code != 200 or not r.content:
-        raise HTTPException(502, f"MyFXBook resposta invalida: HTTP {r.status_code} ({url})")
-    try:
-        data = r.json()
-    except Exception:
-        raise HTTPException(502, f"MyFXBook resposta nao-JSON: {r.text[:200]} ({url})")
+    data = await _myfxbook_request(url, params, cache_key=key)
     if data.get("error"):
         msg = data.get("message", "")
         session_expired = "session" in params and (
             "session" in msg.lower() or "authorized" in msg.lower() or "login" in msg.lower()
         )
         if session_expired and _retry_session:
-            _drop_session()
+            _drop_session(expected_session=params["session"])
             fresh = await get_myfxbook_session()
             return await cached_get(url, {**params, "session": fresh}, _retry_session=False)
         if session_expired:
-            _drop_session()
+            _drop_session(expected_session=params["session"])
         raise HTTPException(502, f"MyFXBook API error: {msg} ({url})")
-    _data_cache[key] = {"data": data, "expires": now + timedelta(minutes=CACHE_TTL_MINUTES)}
     return data
 
 
@@ -838,8 +930,7 @@ def clear_myfxbook_cache(drop_session: bool = False) -> int:
         if "myfxbook.com" in key:
             _data_cache.pop(key, None)
             removed += 1
-    # A sessao NAO e derrubada por padrao: relogar toda hora faz a API do
-    # MyFXBook limitar a taxa e responder "Wrong email/password.".
+    # Limpar dados nao exige novo login nem remove a pausa apos falha.
     if drop_session:
         _drop_session()
     return removed
@@ -927,6 +1018,8 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
         except Exception as e:
             results.append({"slug": acc_slug, "name": ACCOUNTS_MAP.get(acc_slug, {}).get("name", acc_slug), "error": str(e)})
     ok = [a for a in results if not a.get("error")]
+    if len(ok) != len(results):
+        raise HTTPException(502, "Dados indisponiveis: falha ao consultar uma ou mais contas no MyFXBook. Os totais nao foram calculados.")
     total_balance = sum(float(a.get("balance") or 0) for a in ok)
     total_profit_day = sum(float(a.get("profit_day") or 0) for a in ok)
     total_profit_week = sum(float(a.get("profit_week") or 0) for a in ok)

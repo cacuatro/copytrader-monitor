@@ -52,3 +52,27 @@ Health check da API:
 ```txt
 https://seu-projeto.onrender.com/api/status
 ```
+
+## Protecoes da integracao MyFXBook
+
+O monitor reutiliza a sessao por ate 29 dias, renovando quando a API a rejeita.
+A API vincula sessoes ao IP de origem; persistir uma sessao nao garante que ela
+continue valida apos mudanca de IP.
+
+As chamadas sao serializadas, com intervalo conservador de 1,5 segundo entre
+elas, e consultas iguais aproveitam o cache. Esse intervalo nao e uma garantia
+nem um limite oficial do MyFXBook. Falhas de login pausam novas chamadas por
+15 minutos; HTTP 429 respeita tambem Retry-After quando maior. A pausa e salva
+no banco configurado ou em JSON local e nao e removida pelo botao de atualizar.
+No Render, configure DATABASE_URL para persistir a pausa entre redeploys;
+arquivos locais em armazenamento efemero podem desaparecer.
+
+A fila e o bloqueio de login sao por processo. Mantenha um unico worker/instancia
+para esta integracao; varios processos exigem coordenacao distribuida adicional.
+Nao use a mesma sessao salva em ambientes com IPs diferentes.
+
+Validacao local sem chamadas reais ou alteracao de credenciais:
+
+```powershell
+backend/venv/Scripts/python.exe -B -W ignore::DeprecationWarning -m unittest discover -s tests -v
+```
