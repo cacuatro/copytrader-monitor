@@ -10,3 +10,5 @@
 .reference-layout .sc-stats>div:nth-child(odd){border-left:0;padding-left:0}
 .reference-layout .sc-stats>div:nth-child(n+3){border-top:1px solid #ffffff10;padding-top:12px}
 @media(max-width:760px){.reference-layout #chartPeriods{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}.reference-layout #chartPeriods .tab{min-width:0;padding:9px 8px}}
+
+.all-strategies-link{color:var(--green);font-size:13px;text-decoration:none;line-height:1.5;padding:8px 0}.all-strategies-link:hover,.all-strategies-link:focus-visible{text-decoration:underline;text-underline-offset:4px}
