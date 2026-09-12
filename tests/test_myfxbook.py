@@ -30,6 +30,7 @@ class MyfxbookTests(unittest.IsolatedAsyncioTestCase):
             "_login_state_loaded": False,
             "_data_cache": {},
             "_account_snapshots": {},
+            "_account_refresh_tasks": {},
             "_account_locks": {},
             "_account_retry_after": {},
             "_client_config_last_good": None,
@@ -52,6 +53,58 @@ class MyfxbookTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await m.close_myfxbook_client()
+
+    async def test_saved_first_returns_before_upstream_and_deduplicates(self):
+        slug=next(iter(m.ACCOUNTS_MAP))
+        old={"balance":123,"details_complete":True,"fetched_at":(datetime.utcnow()-timedelta(hours=1)).isoformat()+"Z"}
+        m._write_account_snapshot(slug,old)
+        started,release=asyncio.Event(),asyncio.Event()
+        async def fetch(*args,**kwargs):
+            started.set()
+            await release.wait()
+            return {"balance":456,"details_complete":True}
+        with patch.object(m,"_fetch_account_data",side_effect=fetch) as upstream:
+            first=await m.get_account_saved_first(slug)
+            self.assertEqual(first["balance"],123)
+            self.assertTrue(first["refreshing"])
+            await started.wait()
+            second=await m.get_account_saved_first(slug)
+            self.assertEqual(second["balance"],123)
+            self.assertEqual(upstream.call_count,1)
+            release.set()
+            await asyncio.gather(*list(m._account_refresh_tasks.values()))
+            last=await m.get_account_saved_first(slug)
+            self.assertEqual(last["balance"],456)
+            self.assertFalse(last["refreshing"])
+            self.assertEqual(upstream.call_count,1)
+
+    async def test_saved_first_failure_keeps_snapshot_and_stops_retrying(self):
+        slug=next(iter(m.ACCOUNTS_MAP))
+        m._write_account_snapshot(slug,{"balance":123,"fetched_at":"2020-01-01T00:00:00Z"})
+        with patch.object(m,"_fetch_account_data",AsyncMock(side_effect=m.HTTPException(502,"failed"))) as upstream:
+            await m.get_account_saved_first(slug)
+            await asyncio.gather(*list(m._account_refresh_tasks.values()))
+            result=await m.get_account_saved_first(slug)
+            self.assertEqual(result["balance"],123)
+            self.assertFalse(result["refreshing"])
+            self.assertEqual(upstream.await_count,1)
+            self.assertEqual(m._read_account_snapshot(slug)["balance"],123)
+
+    async def test_first_sync_placeholder_and_login_pause(self):
+        slug=next(iter(m.ACCOUNTS_MAP))
+        with patch.object(m,"_fetch_account_data",AsyncMock(return_value={"balance":10,"details_complete":True})):
+            result=await m.get_account_saved_first(slug)
+            self.assertTrue(result["refreshing"])
+            self.assertIn("error",result)
+            self.assertNotIn("balance",result)
+            await asyncio.gather(*list(m._account_refresh_tasks.values()))
+            self.assertEqual((await m.get_account_saved_first(slug))["balance"],10)
+        m._account_snapshots.clear()
+        self.state.clear()
+        m._login_state["failed_until"]=datetime.utcnow()+timedelta(minutes=10)
+        result=await m.get_account_saved_first(slug)
+        self.assertFalse(result["refreshing"])
+        self.assertEqual(m._account_refresh_tasks,{})
 
     def transport(self, handler):
         def record(request):

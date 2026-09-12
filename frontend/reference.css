@@ -22,3 +22,10 @@
 .reference-layout .admin-sidebar .brand-lockup .wordmark{padding:0;font-size:21px}
 .reference-layout .admin-sidebar small{margin-left:20px;font-size:8px;letter-spacing:2.6px}
 @media(max-width:760px){.reference-layout header{height:auto}.reference-layout .brand-emblem{width:44px;height:44px}.reference-layout .brand-lockup{gap:9px}.reference-layout .brand-lockup .wordmark{font-size:22px}.reference-layout .admin-sidebar>.brand-lockup{display:none}.reference-layout #admin header .brand-lockup .wordmark{font-size:20px}}
+
+.admin-period-results{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:14px}
+.reference-layout .admin-period-results .sm{grid-column:auto;padding:18px;min-width:0}
+.record-results>div{display:flex;justify-content:space-between;gap:8px;margin:5px 0;font-size:11px}
+.reference-layout .record-results small{font-size:10px;margin:0;color:var(--muted)}
+#backgroundRefresh[hidden]{display:none}
+@media(max-width:760px){.admin-period-results{grid-template-columns:1fr}.reference-layout .record-results{grid-column:1/-1}.reference-layout .record-results>div{font-size:13px}}

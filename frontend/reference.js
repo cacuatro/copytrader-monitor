@@ -6,7 +6,7 @@ function accountStatus(c){return c.error||!c.data||c.data.data_unavailable?'miss
 renderAdminClient=function(c,period='month',strategyFilter=''){
  const d=c.data||{},state=accountStatus(c),missing=state==='missing',pv=periodValue(d,period);
  const names=(d.accounts||[]).map(a=>a.name).filter(Boolean).join(', ');
- return `<details class="client-record" data-client-slug="${esc(c.slug)}"><summary><div class="record-name"><span class="avatar">${esc(initials(c.name))}</span><span>${esc(c.name)}<small>${esc(c.username||'')}</small></span></div><div class="record-strategies">${esc(names||'Sem dados')}</div><div class="record-balance">${missing?'—':fmtBalance(d.total_balance)}</div><div class="${missing?'n':col(pv[0])}">${missing?'—':fmtMoney(pv[0])}</div><div class="record-date">${esc(savedDate(d.last_success_at))}</div><div class="record-status ${state}"><span class="status-dot"></span>${missing?'Indisponível':state==='stale'?'Dados salvos':'Atualizado'}</div><span class="record-toggle">Ver</span></summary>${originalRenderAdminClient(c,period,strategyFilter)}</details>`;
+ return `<details class="client-record" data-client-slug="${esc(c.slug)}"><summary><div class="record-name"><span class="avatar">${esc(initials(c.name))}</span><span>${esc(c.name)}<small>${esc(c.username||'')}</small></span></div><div class="record-strategies">${esc(names||'Sem dados')}</div><div class="record-balance">${missing?'—':fmtBalance(d.total_balance)}</div><div class="record-results">${[['Hoje','day'],['Semana','week'],['30 dias','month'],['Total','total']].map(([label,key])=>`<div><small>${label}</small><span class="${missing?'n':col(d['total_profit_'+key])}">${missing?'—':fmtMoney(d['total_profit_'+key])}</span></div>`).join('')}</div><div class="record-date">${esc(savedDate(d.last_success_at))}</div><div class="record-status ${state}"><span class="status-dot"></span>${missing?'Indisponível':state==='stale'?'Dados salvos':'Atualizado'}</div><span class="record-toggle">Ver</span></summary>${originalRenderAdminClient(c,period,strategyFilter)}</details>`;
 };
 const referenceRenderAdmin=renderAdmin;
 function updateStrategyFilter(d){
@@ -19,9 +19,9 @@ function clearAdminFilters(){
  for(const id of ['filterClient','filterStrategy','filterStatus'])document.getElementById(id).value='';
  if(adminData)renderAdmin(adminData);
 }
-renderAdmin=function(d){updateStrategyFilter(d);referenceRenderAdmin(d);const h=d.health||{};document.getElementById('syncCounts').innerHTML=`<span class="sync-chip fresh">${Number(h.ok)||0} atualizadas</span><span class="sync-chip stale">${Number(h.stale)||0} precisam de atenção</span>`;document.getElementById('adminAvatar').textContent='AD';};
+renderAdmin=function(d){updateStrategyFilter(d);referenceRenderAdmin(d);const h=d.health||{};document.getElementById('syncCounts').innerHTML=`<span class="sync-chip fresh">${Number(h.ok)||0} atualizadas</span><span class="sync-chip stale">${Number(h.stale)||0} precisam de atenção</span>`;document.getElementById('adminAvatar').textContent='AD';showBackgroundRefresh(d);scheduleSnapshotPoll(d);};
 const referenceRenderClient=render;
-render=function(d){referenceRenderClient(d);document.getElementById('clientAvatar').textContent=initials(d.name);document.getElementById('clientSub').textContent='Acompanhe seus resultados.';};
+render=function(d){referenceRenderClient(d);document.getElementById('clientAvatar').textContent=initials(d.name);document.getElementById('clientSub').textContent='Acompanhe seus resultados.';showBackgroundRefresh(d);scheduleSnapshotPoll(d);};
 const referenceCards=renderCards;
 renderCards=function(){referenceCards();document.querySelectorAll('#cards .sc').forEach((card,i)=>{const a=allAccounts[i];if(a.error)return;const top=card.querySelector('.sc-top');top.insertAdjacentHTML('afterbegin',`<span class="strategy-icon">${uiIcon(/gold/i.test(a.name)?'trend':'chart')}</span>`);const stats=card.querySelector('.sc-stats');stats.innerHTML=`<div><div class="ss-l">Saldo</div><div class="ss-v n">${currencyMode==='brl'?fmtBrl(a.balance_brl):fmtBalance(a.balance)}</div></div><div><div class="ss-l">Resultado na semana</div><div class="ss-v ${col(a.profit_week)}">${fmtCurrency(a.profit_week,a.profit_week_brl)}</div></div><div><div class="ss-l">Resultado em 30 dias</div><div class="ss-v ${col(a.profit_month)}">${fmtCurrency(a.profit_month,a.profit_month_brl)}</div></div><div><div class="ss-l">Resultado total</div><div class="ss-v ${col(a.profit_total)}">${fmtCurrency(a.profit_total,a.profit_total_brl)}</div></div>`;card.insertAdjacentHTML('beforeend','<span class="strategy-link">Ver detalhes →</span>');card.tabIndex=0;card.setAttribute('role','button');card.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();card.click()}})})};
 function referenceLayout(){
@@ -48,12 +48,46 @@ function referenceLayout(){
  const refresh=health.querySelector('button');refresh.classList.add('primary-action');refresh.textContent='↻ Atualizar dados';filters.querySelector('.admin-stats').prepend(refresh);
  const status=document.createElement('select');status.id='filterStatus';status.className='login-input';status.setAttribute('aria-label','Filtrar status');status.innerHTML='<option value="">Todos os status</option><option value="fresh">Atualizado</option><option value="stale">Dados salvos</option><option value="missing">Indisponível</option>';filters.querySelector('.admin-stats').append(status);status.addEventListener('change',()=>adminData&&renderAdmin(adminData));document.getElementById('filterStrategy').addEventListener('change',()=>adminData&&renderAdmin(adminData));
  const clear=document.createElement('button');clear.id='clearAdminFilters';clear.className='tab';clear.type='button';clear.textContent='Limpar filtros';clear.addEventListener('click',clearAdminFilters);filters.querySelector('.admin-stats').append(clear);
- const section=document.createElement('section');section.className='clients-section';section.id='clientsSection';clientRows.before(section);if(section.previousElementSibling?.classList.contains('sec-label'))section.previousElementSibling.remove();section.append(filters);section.insertAdjacentHTML('beforeend','<div class="client-columns"><span>Cliente</span><span>Estratégias</span><span>Saldo</span><span>Resultado</span><span>Últimos dados</span><span>Status</span><span>Ações</span></div>');section.append(clientRows);sync.after(section);
+ const section=document.createElement('section');section.className='clients-section';section.id='clientsSection';clientRows.before(section);if(section.previousElementSibling?.classList.contains('sec-label'))section.previousElementSibling.remove();section.append(filters);section.insertAdjacentHTML('beforeend','<div class="client-columns"><span>Cliente</span><span>Estratégias</span><span>Saldo</span><span>Resultados</span><span>Últimos dados</span><span>Status</span><span>Ações</span></div>');section.append(clientRows);sync.after(section);
  const bottom=document.createElement('div');bottom.className='admin-bottom';section.after(bottom);bottom.append(health,document.getElementById('adminNotices'));
  const extra=document.querySelector('.additional-metrics');bottom.after(extra);
+ const periods=document.createElement('div');periods.className='admin-period-results';
+ for(const id of ['aDay','aWeek','aTotal'])periods.append(document.getElementById(id).closest('.sm'));
+ adm.querySelector('.summary').after(periods);
+ extra.querySelector('summary').textContent='Outras comissões';
  document.getElementById('auditBody').closest('div').removeAttribute('id');document.getElementById('auditBody').closest('.detail').id='adminAudit';
  for(const main of [clientMain,adm])main.insertAdjacentHTML('beforeend','<footer class="dashboard-footer"><span>K4 Trader</span><span>Disciplina para ir mais longe.</span></footer>');
  syncChartPeriod();
+}
+let snapshotTimer=null;
+function showBackgroundRefresh(d){
+ const root=document.querySelector(isAdminPath?'#admin main':'#app main');
+ let status=document.getElementById('backgroundRefresh');
+ if(!status){status=document.createElement('div');status.id='backgroundRefresh';status.className='sync-banner';status.setAttribute('role','status');root.querySelector('.client-sub').after(status)}
+ status.hidden=!d.refreshing;
+ status.textContent='Atualizando em segundo plano… Os últimos dados disponíveis permanecem na tela.';
+}
+function scheduleSnapshotPoll(d){
+ clearTimeout(snapshotTimer);
+ if(!d.refreshing||!authToken)return;
+ const token=authToken;
+ snapshotTimer=setTimeout(async()=>{
+  if(authToken!==token)return;
+  try{
+   const response=await fetch(API_BASE+(isAdminPath?'/admin/summary':'/cliente/'+encodeURIComponent(currentSlug)),{headers:{Authorization:'Bearer '+token}});
+   if(authToken!==token)return;
+   if(response.status===401||response.status===403){logout();return}
+   if(!response.ok)throw new Error('Refresh failed');
+   const next=await response.json();
+   const fields=[...document.querySelectorAll('#adminClients input,#adminClients textarea,#clientProfile input')].map(el=>[el.id,el.value]);
+   const open=[...document.querySelectorAll('.client-record[open]')].map(el=>el.dataset.clientSlug);
+   const focused=document.activeElement?.id,selected=selectedAcc;
+   if(isAdminPath){renderAdmin(next);document.querySelectorAll('.client-record').forEach(el=>el.open=open.includes(el.dataset.clientSlug))}
+   else{render(next);if(selected&&allAccounts.some(a=>a.slug===selected&&!a.error)){selectedAcc=selected;renderCards();renderDetail(activeAccount())}}
+   for(const [id,value] of fields){const el=document.getElementById(id);if(el)el.value=value}
+   if(focused)document.getElementById(focused)?.focus({preventScroll:true});
+  }catch(e){if(authToken===token)scheduleSnapshotPoll(d)}
+ },5000);
 }
 referenceLayout();
 

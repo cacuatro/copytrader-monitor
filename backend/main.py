@@ -141,6 +141,7 @@ CLIENTS_MAP = {
 _session_cache = {"session": None, "expires": None}
 _data_cache = {}
 _account_snapshots = {}
+_account_refresh_tasks = {}
 _account_locks = {}
 _account_retry_after = {}
 _client_config_last_good = None
@@ -852,6 +853,7 @@ def _get_myfxbook_client():
 @app.on_event("shutdown")
 async def close_myfxbook_client():
     global _myfxbook_client
+    await stop_account_refreshes()
     if _myfxbook_client is not None:
         await _myfxbook_client.aclose()
         _myfxbook_client = None
@@ -1103,12 +1105,12 @@ async def login(credentials: dict, request: Request):
     return {"token": make_token(client_slug), "role": "client", "client_slug": client_slug, "name": all_clients[client_slug]["name"], "expires_in_hours": TOKEN_TTL_HOURS}
 
 
-async def build_client_data(slug: str, lite: bool = False) -> dict:
+async def build_client_data(slug: str, lite: bool = False, saved_first: bool = False) -> dict:
     client_info = get_client_info(slug)
     results = []
     for acc_slug in client_info["accounts"]:
         try:
-            results.append(await get_account_data(acc_slug, lite=lite))
+            results.append(await (get_account_saved_first(acc_slug, lite=lite) if saved_first else get_account_data(acc_slug, lite=lite)))
         except Exception as e:
             results.append({"slug": acc_slug, "name": ACCOUNTS_MAP.get(acc_slug, {}).get("name", acc_slug), "error": str(e)})
     ok = [a for a in results if not a.get("error")]
@@ -1135,7 +1137,14 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
     commission_month = round(total_profit_month * COMMISSION_RATE, 2)
     commission_year = round(total_profit_year * COMMISSION_RATE, 2)
     commission_total = round(total_profit_total * COMMISSION_RATE, 2)
-    usd_brl = await get_usd_brl_rate()
+    if saved_first:
+        cached_rate = _data_cache.get("usd_brl_rate", {}).get("data", {})
+        rate_account = next((a for a in ok if a.get("usd_brl_rate")), {})
+        usd_brl = cached_rate or {"rate": rate_account.get("usd_brl_rate", float(USD_BRL_RATE or 5)),
+                                 "source": rate_account.get("exchange_rate_source", "Cotacao de referencia"),
+                                 "updated_at": rate_account.get("exchange_rate_updated_at")}
+    else:
+        usd_brl = await get_usd_brl_rate()
     brl_rate = usd_brl["rate"]
     manual_withdrawals = round(float(client_info.get("manual_withdrawals") or 0), 2)
     manual_commission = round(float(client_info.get("manual_commission") or 0), 2)
@@ -1195,7 +1204,7 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
         result["total_" + field + "_brl"] = round(value * brl_rate, 2) if value is not None else None
     missing = len(ok) != len(results) or not results
     saved_accounts = [a for a in ok if a.get("stale")]
-    result.update(data_unavailable=missing, stale=bool(saved_accounts),
+    result.update(refreshing=any(a.get("refreshing") for a in results), data_unavailable=missing, stale=bool(saved_accounts),
                   last_success_at=min((a.get("fetched_at", "") for a in ok), default=""),
                   sync_warning=("Algumas contas ainda nao possuem dados salvos; totais indisponiveis." if missing else
                                 "Exibindo ultimos dados salvos. A atualizacao esta temporariamente indisponivel." if saved_accounts else ""))
@@ -1210,18 +1219,16 @@ async def build_client_data(slug: str, lite: bool = False) -> dict:
 async def get_client(slug: str, request: Request, authorization: Optional[str] = Header(None)):
     require_client_auth(slug, authorization)
     write_access_log("panel", slug, request)
-    return await build_client_data(slug)
+    return await build_client_data(slug, saved_first=True)
 
 
 @app.get("/admin/summary")
 async def admin_summary(authorization: Optional[str] = Header(None)):
     require_admin_auth(authorization)
     clients = []
-    for i, (slug, info) in enumerate(clients_map().items()):
-        if i > 0:
-            await asyncio.sleep(1)
+    for slug, info in clients_map().items():
         try:
-            data = await build_client_data(slug, lite=True)
+            data = await build_client_data(slug, lite=True, saved_first=True)
             last_access = recent_client_access(slug)
             clients.append({
                 "slug": slug,
@@ -1235,6 +1242,7 @@ async def admin_summary(authorization: Optional[str] = Header(None)):
             clients.append({"slug": slug, "name": info["name"], "error": str(e), "last_access": recent_client_access(slug)})
     return {
         "clients": clients,
+        "refreshing": any(c.get("data", {}).get("refreshing") for c in clients),
         "access_logs": read_access_logs(200),
         "audit_logs": read_audit_logs(200),
         "global_notices": read_notice_store().get("global", [])[:10],
@@ -1386,6 +1394,51 @@ def _write_account_snapshot(slug: str, data: dict) -> None:
             write_json_file(path, data)
     except Exception:
         pass
+
+
+async def _refresh_saved_account(slug: str, lite: bool):
+    try:
+        await get_account_data(slug, lite=lite)
+    except Exception:
+        # get_account_data preserves the last snapshot and sets the retry delay.
+        pass
+    finally:
+        _account_refresh_tasks.pop(slug, None)
+
+
+@app.on_event("shutdown")
+async def stop_account_refreshes():
+    tasks = list(_account_refresh_tasks.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _account_refresh_tasks.clear()
+
+
+async def get_account_saved_first(slug: str, lite: bool = False):
+    if slug not in ACCOUNTS_MAP:
+        raise HTTPException(404, "Conta nao encontrada")
+    saved = _read_account_snapshot(slug)
+    now = datetime.utcnow()
+    try:
+        recent = now - datetime.fromisoformat(saved["fetched_at"].removesuffix("Z")) < timedelta(minutes=CACHE_TTL_MINUTES)
+    except (KeyError, ValueError, TypeError):
+        recent = False
+    complete = lite or saved.get("details_complete") or saved.get("details_warning")
+    needs_refresh = not recent or not complete or saved.get("stale")
+    _load_login_state()
+    paused = (_login_state.get("failed_until") or datetime.min) > now
+    waiting = _account_retry_after.get(slug, datetime.min) > now
+    if needs_refresh and not paused and not waiting and slug not in _account_refresh_tasks:
+        _account_refresh_tasks[slug] = asyncio.create_task(_refresh_saved_account(slug, lite))
+    refreshing = slug in _account_refresh_tasks
+    if saved:
+        return {**saved, "refreshing": refreshing, "stale": bool(not recent or saved.get("stale")),
+                "sync_warning": "Atualizando em segundo plano; exibindo dados salvos." if refreshing else
+                                "Ultimos dados salvos; nova tentativa aguardando." if waiting or paused else saved.get("sync_warning", "")}
+    return {"slug": slug, "name": ACCOUNTS_MAP[slug].get("name", slug), "refreshing": refreshing,
+            "error": "Primeira sincronizacao em andamento." if refreshing else "Sem consulta valida salva; nova tentativa aguardando."}
 
 
 async def get_account_data(slug: str, lite: bool = False):
