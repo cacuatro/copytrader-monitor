@@ -29,3 +29,6 @@
 .reference-layout .record-results small{font-size:10px;margin:0;color:var(--muted)}
 #backgroundRefresh[hidden]{display:none}
 @media(max-width:760px){.admin-period-results{grid-template-columns:1fr}.reference-layout .record-results{grid-column:1/-1}.reference-layout .record-results>div{font-size:13px}}
+
+.insight-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin:16px 0}.insight-controls label{display:grid;gap:6px;font-size:11px;color:var(--muted);min-width:140px;flex:1}.insight-controls .login-input{font-size:12px}.admin-insights .chart-wrap{margin-top:20px}#insightTotal{font-size:24px}#insightAlertType{max-width:200px;font-size:12px}.insight-alert{display:flex;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #ffffff10}.insight-alert>div{flex:1;min-width:0}.insight-alert strong{font-size:13px}.insight-alert small{display:block;color:var(--muted);font-size:11px;margin-top:5px;overflow-wrap:anywhere}#insightAlerts{max-height:330px;overflow:auto}.reference-layout .admin-insights [hidden]{display:none}
+@media(max-width:760px){.insight-controls .tabs{width:100%;display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}.insight-controls .tabs .tab{min-width:0;padding:9px}.insight-controls label{min-width:110px}.insight-alert .tab{padding:8px;font-size:11px}}

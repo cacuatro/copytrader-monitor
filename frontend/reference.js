@@ -19,7 +19,7 @@ function clearAdminFilters(){
  for(const id of ['filterClient','filterStrategy','filterStatus'])document.getElementById(id).value='';
  if(adminData)renderAdmin(adminData);
 }
-renderAdmin=function(d){updateStrategyFilter(d);referenceRenderAdmin(d);const h=d.health||{};document.getElementById('syncCounts').innerHTML=`<span class="sync-chip fresh">${Number(h.ok)||0} atualizadas</span><span class="sync-chip stale">${Number(h.stale)||0} precisam de atenção</span>`;document.getElementById('adminAvatar').textContent='AD';showBackgroundRefresh(d);scheduleSnapshotPoll(d);};
+renderAdmin=function(d){updateStrategyFilter(d);referenceRenderAdmin(d);const h=d.health||{};document.getElementById('syncCounts').innerHTML=`<span class="sync-chip fresh">${Number(h.ok)||0} atualizadas</span><span class="sync-chip stale">${Number(h.stale)||0} precisam de atenção</span>`;document.getElementById('adminAvatar').textContent='AD';showBackgroundRefresh(d);scheduleSnapshotPoll(d);renderAdminInsights(d);};
 const referenceRenderClient=render;
 render=function(d){referenceRenderClient(d);document.getElementById('clientAvatar').textContent=initials(d.name);document.getElementById('clientSub').textContent='Acompanhe seus resultados.';showBackgroundRefresh(d);scheduleSnapshotPoll(d);};
 const referenceCards=renderCards;
@@ -90,5 +90,6 @@ function scheduleSnapshotPoll(d){
  },5000);
 }
 referenceLayout();
+setupAdminInsights();
 
 load();
